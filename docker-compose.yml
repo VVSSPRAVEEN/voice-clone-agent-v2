@@ -1,0 +1,80 @@
+# =============================================================================
+# Voice Clone Agent - Docker Compose
+# Telugu/English zero-shot voice cloning agent for RTX 3060 6GB.
+# =============================================================================
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vca-backend
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
+      - PIPELINE_MODE=${PIPELINE_MODE:-parallel}
+      - MAX_CONCURRENT_CALLS=${MAX_CONCURRENT_CALLS:-1}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./backend/app:/app/app           # dev hot-reload
+      - ./backend/scripts:/app/scripts
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: vca-frontend
+    environment:
+      - BACKEND_URL=http://backend:8000
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./frontend/streamlit_app:/app/streamlit_app
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    command: streamlit run streamlit_app/main.py --server.port=8501 --server.address=0.0.0.0 --server.fileWatcherType=auto
+
+  # Optional: MinIO for S3-compatible audio storage
+  # Uncomment to use instead of local filesystem
+  # minio:
+  #   image: minio/minio:latest
+  #   container_name: vca-minio
+  #   ports:
+  #     - "9000:9000"
+  #     - "9001:9001"
+  #   volumes:
+  #     - ./data/minio:/data
+  #   environment:
+  #     - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-minioadmin}
+  #     - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-minioadmin}
+  #   command: server /data --console-address ":9001"
+  #   restart: unless-stopped
+
+  # Optional: Redis for multi-worker scaling (future)
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: vca-redis
+  #   ports:
+  #     - "6379:6379"
+  #   restart: unless-stopped

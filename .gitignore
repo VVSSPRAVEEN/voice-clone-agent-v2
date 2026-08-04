@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project data (runtime, never commit)
+data/speakers/*
+!data/speakers/.gitkeep
+data/calls/*
+!data/calls/.gitkeep
+data/models/*
+!data/models/.gitkeep
+
+# Evaluation assets (gitignored by design)
+evaluation/test_clips/*
+!evaluation/test_clips/.gitkeep
+evaluation/ground_truth/*
+!evaluation/ground_truth/.gitkeep
+
+# Env
+.env
+.env.local
+
+# Logs
+*.log
+logs/
+
+# Docker
+docker-compose.override.yml
+
+# Streamlit
+.streamlit/secrets.toml

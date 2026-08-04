@@ -1,0 +1,189 @@
+"""WebSocket handler for live call streaming.
+
+Protocol (JSON envelopes over text frames; binary audio over binary frames):
+
+Client -> Server:
+  - Text frame: {"type":"hello","speaker_id":"...","call_id":"...?","title":"...?","sample_rate":16000}
+  - Binary frame: int16 PCM 16 kHz mono chunk (20-50 ms)
+  - Text frame: {"type":"end"}            # graceful end
+
+Server -> Client (text frames):
+  - {"type":"hello","call_id":"..."}
+  - {"type":"vad","event":"speech_end","t0":..,"t1":..}
+  - {"type":"transcript","t0":..,"t1":..,"speaker":"user","text":"..","language":"te","is_final":true}
+  - {"type":"llm","text":"..","source":"llm|fallback","latency_ms":..}
+  - {"type":"audio","pcm_int16":[...],"sample_rate":24000,"engine":"xtts"}
+  - {"type":"audio_end","t0":..,"t1":..,"latency_ms":..}
+  - {"type":"status","message":"..."}
+  - {"type":"error","stage":"...","message":"..."}
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Optional
+
+import numpy as np
+from fastapi import WebSocket, WebSocketDisconnect
+from loguru import logger
+
+from .config import SETTINGS
+from .pipeline import Pipeline, PipelineEvent
+
+
+class ConnectionManager:
+    """Tracks active WebSocket connections; enforces MAX_CONCURRENT_CALLS."""
+    def __init__(self, max_concurrent: int):
+        self.max_concurrent = max(1, max_concurrent)
+        self.active: set[WebSocket] = set()
+        self._sem = asyncio.Semaphore(self.max_concurrent)
+
+    async def accept(self, ws: WebSocket) -> bool:
+        if len(self.active) >= self.max_concurrent:
+            await ws.accept()
+            await ws.send_text(json.dumps({
+                "type": "error",
+                "data": {"message": "Server busy: max concurrent calls reached. Please retry."},
+            }))
+            await ws.close(code=1013)
+            return False
+        await ws.accept()
+        self.active.add(ws)
+        return True
+
+    def release(self, ws: WebSocket):
+        self.active.discard(ws)
+
+    async def acquire_slot(self) -> bool:
+        await self._sem.acquire()
+        return True
+
+    def release_slot(self):
+        self._sem.release()
+
+
+async def handle_call_websocket(
+    ws: WebSocket,
+    pipeline: Pipeline,
+    manager: ConnectionManager,
+):
+    accepted = await manager.accept(ws)
+    if not accepted:
+        return
+
+    # Wait for hello
+    try:
+        hello_raw = await asyncio.wait_for(ws.receive_text(), timeout=30.0)
+    except (asyncio.TimeoutError, WebSocketDisconnect):
+        manager.release(ws)
+        return
+
+    try:
+        hello = json.loads(hello_raw)
+    except Exception:
+        await ws.send_text(json.dumps({"type": "error", "data": {"message": "Invalid hello JSON"}}))
+        await ws.close()
+        manager.release(ws)
+        return
+
+    if hello.get("type") != "hello" or "speaker_id" not in hello:
+        await ws.send_text(json.dumps({"type": "error", "data": {"message": "Expected hello with speaker_id"}}))
+        await ws.close()
+        manager.release(ws)
+        return
+
+    speaker_id = hello["speaker_id"]
+    title = hello.get("title")
+    call_id = hello.get("call_id")
+    client_sr = int(hello.get("sample_rate", 16000))
+
+    # Acquire a processing slot (bounded concurrency)
+    await manager.acquire_slot()
+    try:
+        # Create audio queue from incoming binary frames
+        audio_q: asyncio.Queue[np.ndarray | None] = asyncio.Queue(maxsize=64)
+
+        async def audio_producer():
+            try:
+                while True:
+                    msg = await ws.receive()
+                    if msg.get("type") == "websocket.disconnect":
+                        break
+                    if "bytes" in msg and msg["bytes"] is not None:
+                        raw = msg["bytes"]
+                        arr = np.frombuffer(raw, dtype=np.int16).copy()
+                        if client_sr != 16000:
+                            # Resample via librosa if needed
+                            import librosa
+                            f32 = arr.astype(np.float32) / 32768.0
+                            f32 = librosa.resample(f32, orig_sr=client_sr, target_sr=16000)
+                            arr = (f32 * 32768.0).astype(np.int16)
+                        await audio_q.put(arr)
+                    elif "text" in msg and msg["text"] is not None:
+                        try:
+                            t = json.loads(msg["text"])
+                            if t.get("type") == "end":
+                                break
+                        except Exception:
+                            pass
+            except WebSocketDisconnect:
+                pass
+            finally:
+                await audio_q.put(None)
+
+        async def audio_stream():
+            while True:
+                chunk = await audio_q.get()
+                if chunk is None:
+                    return
+                yield chunk
+
+        async def on_event(ev: PipelineEvent):
+            try:
+                await ws.send_text(json.dumps({
+                    "type": ev.kind,
+                    "data": ev.data,
+                    "call_id": ev.data.get("call_id"),
+                }, ensure_ascii=False))
+            except Exception as e:
+                logger.warning(f"WS send failed: {e}")
+
+        # Send hello ack
+        await ws.send_text(json.dumps({"type": "hello", "data": {"message": "connected"}}))
+
+        producer_task = asyncio.create_task(audio_producer())
+        try:
+            call_id = await pipeline.run_streaming(
+                audio_stream=audio_stream(),
+                speaker_id=speaker_id,
+                call_id=call_id,
+                title=title,
+                on_event=on_event,
+            )
+            await ws.send_text(json.dumps({
+                "type": "call_end",
+                "call_id": call_id,
+                "data": {"call_id": call_id},
+            }))
+        finally:
+            if not producer_task.done():
+                producer_task.cancel()
+                try:
+                    await producer_task
+                except Exception:
+                    pass
+
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected (speaker={speaker_id})")
+    except Exception as e:
+        logger.exception(f"WebSocket handler error: {e}")
+        try:
+            await ws.send_text(json.dumps({
+                "type": "error",
+                "data": {"message": str(e)},
+            }))
+        except Exception:
+            pass
+    finally:
+        manager.release(ws)
+        manager.release_slot()

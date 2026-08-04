@@ -1,0 +1,6 @@
+data_dir=D:\voice-clone-agent\data
+[STT] 'Hello, could you order two TelaGoo books for me and tell me when they will arrive?' (14661.067300010473ms)
+[LLM] 'I can help with your request, but I need to check the inventory first. Let me look into it.' source=vllm (9374.91970002884ms)
+[ERROR] {'stage': 'tts', 'message': " ❗ Language te is not supported. Supported languages are ['en', 'es', 'fr', 'de', 'it', 'pt', 'pl', 'tr', 'ru', 'nl', 'cs', 'ar', 'zh-cn', 'hu', 'ko', 'ja', 'hi']", 'call_id': 'call_f2e31d57d915'}
+call_id=call_f2e31d57d915
+events: ['status', 'vad', 'transcript', 'llm', 'error', 'status']

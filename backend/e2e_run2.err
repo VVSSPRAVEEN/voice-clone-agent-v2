@@ -1,0 +1,121 @@
+2026-08-04 23:06:46.763 | INFO     | app.call_logger:create_call:94 - Call created: call_f2e31d57d915 (speaker=test1)
+2026-08-04 23:06:48.972 | INFO     | app.vad_worker:_ensure_model:59 - Silero VAD loaded (torch)
+2026-08-04 23:06:52.682 | INFO     | app.stt_worker:_ensure_model:53 - Loading faster-whisper model=medium device=cuda compute_type=int8
+D:\voice-clone-agent\backend\.venv\Lib\site-packages\huggingface_hub\file_download.py:143: UserWarning: `huggingface_hub` cache-system uses symlinks by default to efficiently store duplicated files but your machine does not support them in D:\voice-clone-agent\data\models\faster-whisper\models--Systran--faster-whisper-medium. Caching files will still work but in a degraded version that might require more space on your disk. This warning can be disabled by setting the `HF_HUB_DISABLE_SYMLINKS_WARNING` environment variable. For more details, see https://huggingface.co/docs/huggingface_hub/how-to-cache#limitations.
+To support symlinks on Windows, you either need to activate Developer Mode or to run Python as an administrator. In order to activate developer mode, see this article: https://docs.microsoft.com/en-us/windows/apps/get-started/enable-your-device-for-development
+  warnings.warn(message)
+2026-08-04 23:13:33.286 | INFO     | app.stt_worker:_ensure_model:63 - faster-whisper loaded
+2026-08-04 23:14:18.328 | INFO     | app.tts_worker:_ensure_xtts:57 - Loading Coqui XTTS v2 on device=cpu
+2026-08-04 23:14:34.062 | INFO     | app.tts_worker:_ensure_xtts:60 - Coqui XTTS v2 loaded
+2026-08-04 23:14:34.086 | ERROR    | app.pipeline:tts_stage:240 - TTS stage error:  ❗ Language te is not supported. Supported languages are ['en', 'es', 'fr', 'de', 'it', 'pt', 'pl', 'tr', 'ru', 'nl', 'cs', 'ar', 'zh-cn', 'hu', 'ko', 'ja', 'hi']
+Traceback (most recent call last):
+
+  File "D:\voice-clone-agent\evaluation\e2e_run2.py", line 74, in <module>
+    asyncio.run(main())
+    │       │   └ <function main at 0x0000014C457019E0>
+    │       └ <function run at 0x0000014C249122A0>
+    └ <module 'asyncio' from 'C:\\ProgramData\\anaconda3\\Lib\\asyncio\\__init__.py'>
+
+  File "C:\ProgramData\anaconda3\Lib\asyncio\runners.py", line 194, in run
+    return runner.run(main)
+           │      │   └ <coroutine object main at 0x0000014C45698BC0>
+           │      └ <function Runner.run at 0x0000014C249BBB00>
+           └ <asyncio.runners.Runner object at 0x0000014C24E8C7A0>
+  File "C:\ProgramData\anaconda3\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           │    │     │                  └ <Task pending name='Task-1' coro=<main() running at D:\voice-clone-agent\evaluation\e2e_run2.py:66> wait_for=<_GatheringFutur...
+           │    │     └ <function BaseEventLoop.run_until_complete at 0x0000014C249B9760>
+           │    └ <ProactorEventLoop running=True closed=False debug=False>
+           └ <asyncio.runners.Runner object at 0x0000014C24E8C7A0>
+  File "C:\ProgramData\anaconda3\Lib\asyncio\base_events.py", line 674, in run_until_complete
+    self.run_forever()
+    │    └ <function ProactorEventLoop.run_forever at 0x0000014C24E7CE00>
+    └ <ProactorEventLoop running=True closed=False debug=False>
+  File "C:\ProgramData\anaconda3\Lib\asyncio\windows_events.py", line 322, in run_forever
+    super().run_forever()
+  File "C:\ProgramData\anaconda3\Lib\asyncio\base_events.py", line 641, in run_forever
+    self._run_once()
+    │    └ <function BaseEventLoop._run_once at 0x0000014C249BB4C0>
+    └ <ProactorEventLoop running=True closed=False debug=False>
+  File "C:\ProgramData\anaconda3\Lib\asyncio\base_events.py", line 1986, in _run_once
+    handle._run()
+    │      └ <function Handle._run at 0x0000014C249019E0>
+    └ <Handle Task.task_wakeup(<Future finis...'ja', 'hi']")>)>
+  File "C:\ProgramData\anaconda3\Lib\asyncio\events.py", line 88, in _run
+    self._context.run(self._callback, *self._args)
+    │    │            │    │           │    └ <member '_args' of 'Handle' objects>
+    │    │            │    │           └ <Handle Task.task_wakeup(<Future finis...'ja', 'hi']")>)>
+    │    │            │    └ <member '_callback' of 'Handle' objects>
+    │    │            └ <Handle Task.task_wakeup(<Future finis...'ja', 'hi']")>)>
+    │    └ <member '_context' of 'Handle' objects>
+    └ <Handle Task.task_wakeup(<Future finis...'ja', 'hi']")>)>
+
+> File "D:\voice-clone-agent\backend\app\pipeline.py", line 211, in tts_stage
+    tts_res = await self.tts.synthesize(
+                    │    │   └ <function TTSWorker.synthesize at 0x0000014C457005E0>
+                    │    └ <app.tts_worker.TTSWorker object at 0x0000014C454915B0>
+                    └ <app.pipeline.Pipeline object at 0x0000014C456F6EA0>
+
+  File "D:\voice-clone-agent\backend\app\tts_worker.py", line 110, in synthesize
+    return await self._synth_xtts(text, speaker_ref_wav, language)
+                 │    │           │     │                └ 'te'
+                 │    │           │     └ WindowsPath('D:/voice-clone-agent/data/speakers/test1/ref.wav')
+                 │    │           └ 'I can help with your request, but I need to check the inventory first. Let me look into it.'
+                 │    └ <function TTSWorker._synth_xtts at 0x0000014C45700680>
+                 └ <app.tts_worker.TTSWorker object at 0x0000014C454915B0>
+
+  File "D:\voice-clone-agent\backend\app\tts_worker.py", line 141, in _synth_xtts
+    audio = await asyncio.to_thread(_do)
+                  │       │         └ <function TTSWorker._synth_xtts.<locals>._do at 0x0000014CC5FADA80>
+                  │       └ <function to_thread at 0x0000014C24DD3100>
+                  └ <module 'asyncio' from 'C:\\ProgramData\\anaconda3\\Lib\\asyncio\\__init__.py'>
+
+  File "C:\ProgramData\anaconda3\Lib\asyncio\threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+                 │    │                     └ functools.partial(<built-in method run of _contextvars.Context object at 0x0000014CC5A6DB40>, <function TTSWorker._synth_xtts...
+                 │    └ <function BaseEventLoop.run_in_executor at 0x0000014C249BA020>
+                 └ <ProactorEventLoop running=True closed=False debug=False>
+  File "C:\ProgramData\anaconda3\Lib\concurrent\futures\thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             │        │            └ None
+             │        └ None
+             └ None
+
+  File "D:\voice-clone-agent\backend\app\tts_worker.py", line 131, in _do
+    wav = self._xtts.tts(
+          │    │     └ <function TTS.tts at 0x0000014CC5988220>
+          │    └ TTS(
+          │        (synthesizer): Synthesizer(
+          │          (tts_model): Xtts(
+          │            (gpt): GPT(
+          │              (conditioning_encoder): ConditioningEncod...
+          └ <app.tts_worker.TTSWorker object at 0x0000014C454915B0>
+
+  File "D:\voice-clone-agent\backend\.venv\Lib\site-packages\TTS\api.py", line 329, in tts
+    wav = self.synthesizer.tts(
+          └ TTS(
+              (synthesizer): Synthesizer(
+                (tts_model): Xtts(
+                  (gpt): GPT(
+                    (conditioning_encoder): ConditioningEncod...
+  File "D:\voice-clone-agent\backend\.venv\Lib\site-packages\TTS\utils\synthesizer.py", line 383, in tts
+    outputs = self.tts_model.synthesize(
+              └ Synthesizer(
+                  (tts_model): Xtts(
+                    (gpt): GPT(
+                      (conditioning_encoder): ConditioningEncoder(
+                        (init): Conv1d(8...
+  File "D:\voice-clone-agent\backend\.venv\Lib\site-packages\TTS\tts\models\xtts.py", line 422, in synthesize
+    assert "zh-cn" if language == "zh" else language in self.config.languages, (
+                      │                     │           │    │      └ ['en', 'es', 'fr', 'de', 'it', 'pt', 'pl', 'tr', 'ru', 'nl', 'cs', 'ar', 'zh-cn', 'hu', 'ko', 'ja', 'hi']
+                      │                     │           │    └ XttsConfig(output_path='output', logger_uri=None, run_name='run', project_name=None, run_description='🐸Coqui trainer run.', p...
+                      │                     │           └ Xtts(
+                      │                     │               (gpt): GPT(
+                      │                     │                 (conditioning_encoder): ConditioningEncoder(
+                      │                     │                   (init): Conv1d(80, 1024, kernel_size=(1,), stride=...
+                      │                     └ 'te'
+                      └ 'te'
+
+AssertionError:  ❗ Language te is not supported. Supported languages are ['en', 'es', 'fr', 'de', 'it', 'pt', 'pl', 'tr', 'ru', 'nl', 'cs', 'ar', 'zh-cn', 'hu', 'ko', 'ja', 'hi']
+2026-08-04 23:14:36.793 | INFO     | app.call_logger:finalize_call:161 - Call finalized: call_f2e31d57d915 (469.9s)
+2026-08-04 23:14:37.133 | INFO     | app.tts_worker:unload:181 - TTS model unloaded; VRAM cache cleared

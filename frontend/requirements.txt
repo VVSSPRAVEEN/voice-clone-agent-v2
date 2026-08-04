@@ -1,0 +1,8 @@
+streamlit==1.39.0
+streamlit-webrtc==0.47.9
+httpx==0.27.2
+numpy==1.26.4
+soundfile==0.12.1
+pydub==0.25.1
+Python-IO==0.5.0
+altair<5
