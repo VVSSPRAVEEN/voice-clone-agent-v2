@@ -251,7 +251,7 @@ async def create_speaker(
         if ref is not None:
             stt = get_stt()
             parts = []
-            async for res in stt.transcribe_file(str(ref), language="auto"):
+            async for res in stt.transcribe_file(str(ref), language=language or "auto"):
                 parts.append(res.text)
             prompt_text = " ".join(parts).strip()
             _speaker_reg.update_meta(meta["speaker_id"], prompt_text=prompt_text)

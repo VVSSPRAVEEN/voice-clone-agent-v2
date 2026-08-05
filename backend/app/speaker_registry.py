@@ -37,6 +37,12 @@ def _safe_id(raw: str) -> str:
     return s
 
 
+def _write_meta(meta_path: Path, meta: dict) -> None:
+    raw = json.dumps(meta, indent=2, ensure_ascii=False)
+    raw = raw.encode("utf-8", errors="replace").decode("utf-8")
+    meta_path.write_text(raw, encoding="utf-8")
+
+
 class SpeakerRegistry:
     def __init__(self, root: Path | None = None):
         self.root = root or SETTINGS.speakers_dir
@@ -53,14 +59,14 @@ class SpeakerRegistry:
         for d in sorted(self.root.iterdir()):
             meta_path = d / "meta.json"
             if meta_path.exists():
-                out.append(json.loads(meta_path.read_text()))
+                out.append(json.loads(meta_path.read_text(encoding="utf-8")))
         return out
 
     def get(self, speaker_id: str) -> dict | None:
         meta_path = self._dir(speaker_id) / "meta.json"
         if not meta_path.exists():
             return None
-        return json.loads(meta_path.read_text())
+        return json.loads(meta_path.read_text(encoding="utf-8"))
 
     def get_ref_wav(self, speaker_id: str) -> Path | None:
         d = self._dir(speaker_id)
@@ -102,7 +108,7 @@ class SpeakerRegistry:
             "prompt_text": "",
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        (d / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+        _write_meta(d / "meta.json", meta)
         logger.info(f"Speaker created: {sid} ({display_name}), ref={duration:.2f}s")
         return meta
 
@@ -111,7 +117,7 @@ class SpeakerRegistry:
         if meta is None:
             return None
         meta.update(fields)
-        (self._dir(speaker_id) / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+        _write_meta(self._dir(speaker_id) / "meta.json", meta)
         return meta
 
     def delete(self, speaker_id: str) -> bool:
