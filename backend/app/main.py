@@ -218,6 +218,7 @@ async def list_speakers(_: bool = Depends(verify_api_key)):
             display_name=meta["display_name"],
             language=meta["language"],
             ref_duration_s=meta.get("ref_duration_s", 0.0),
+            prompt_text=meta.get("prompt_text") or None,
             created_at=meta["created_at"],
         ))
     return out
@@ -244,6 +245,7 @@ async def create_speaker(
         ref_audio_bytes=raw,
         ref_audio_format=suffix,
     )
+    prompt_text = None
     try:
         ref = _speaker_reg.get_ref_wav(meta["speaker_id"])
         if ref is not None:
@@ -260,6 +262,7 @@ async def create_speaker(
         display_name=meta["display_name"],
         language=meta["language"],
         ref_duration_s=meta["ref_duration_s"],
+        prompt_text=prompt_text,
         created_at=meta["created_at"],
     )
 
