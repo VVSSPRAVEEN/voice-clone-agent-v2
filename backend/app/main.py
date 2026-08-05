@@ -7,6 +7,12 @@ Exposes:
 """
 from __future__ import annotations
 
+# Offline-first: never contact the HF Hub at import/runtime. All weights are
+# cached under D:\hf-models (HF_HOME). Applies to diffusers/transformers/
+# huggingface_hub/faster-whisper (override with HF_HUB_OFFLINE=0 if needed).
+import os
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
 import asyncio
 import base64
 import json
@@ -36,7 +42,7 @@ from .models import (
     HealthOut, SettingsOut,
 )
 from .speaker_registry import SpeakerRegistry
-from .call_logger import CallLogger
+from .call_logger import CallLogger, _safe_call_id
 from .vad_worker import VADWorker
 from .stt_worker import STTWorker
 from .llm_worker import LLMWorker
@@ -116,15 +122,13 @@ async def lifespan(app: FastAPI):
     SETTINGS.ensure_dirs()
     logger.info(f"Voice Clone Agent starting | mode={SETTINGS.pipeline_mode} device={SETTINGS.device} tts={SETTINGS.tts_engine}")
     logger.info(f"LLM enabled: {SETTINGS.llm_enabled}")
+    # Heavy weights live in the persistent model server (port 8002); ask it
+    # to warm up in the background. Nothing blocks startup here.
     preload_task = asyncio.create_task(_preload_engines())
     yield
     # Cleanup
     preload_task.cancel()
     try:
-        if _tts is not None:
-            _tts.unload()
-        if _stt is not None:
-            _stt.unload()
         if _llm is not None:
             await _llm.close()
     except Exception:
@@ -132,19 +136,16 @@ async def lifespan(app: FastAPI):
 
 
 async def _preload_engines() -> None:
-    """Warm TTS engines in the background so the first live call is fast."""
+    """Ask the persistent model server to warm up its engines."""
     try:
-        tts = get_tts()
-        await tts.preload()
-        logger.info("Engine preload complete")
+        from .model_client import get_model_client
+        ok = await get_model_client().prewarm()
+        if ok:
+            logger.info("Model server prewarm requested")
+        else:
+            logger.warning("Model server not reachable on :8002 — start it first (models will lazy-load)")
     except Exception as e:
-        logger.warning(f"Engine preload error: {e}")
-    try:
-        stt = get_stt()
-        await asyncio.to_thread(stt._ensure_model)
-        logger.info("STT preloaded")
-    except Exception as e:
-        logger.warning(f"STT preload error: {e}")
+        logger.warning(f"Model server prewarm error: {e}")
 
 
 # --- App -------------------------------------------------------------------
@@ -192,6 +193,14 @@ def _vram_stats() -> tuple[int, int, int]:
 @app.get("/health", response_model=HealthOut)
 async def health():
     total, used, free = _vram_stats()
+    ms = "down"
+    try:
+        from .model_client import get_model_client
+        mh = await get_model_client().health()
+        if mh:
+            ms = "up" if (mh.get("praxy_loaded") or mh.get("xtts_loaded")) else "warming"
+    except Exception:
+        pass
     return HealthOut(
         status="ok",
         device=SETTINGS.device,
@@ -203,6 +212,7 @@ async def health():
         vram_free_mb=free,
         speakers_count=len(_speaker_reg.list_speakers()),
         calls_count=await _call_logger.count(),
+        model_server_status=ms,
     )
 
 
@@ -333,15 +343,29 @@ async def tts_synthesize(
     import wave
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav", dir=str(SETTINGS.calls_dir))
     tmp.close()
-    with wave.open(tmp.name, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(res.sample_rate)
-        wf.writeframes(res.audio.tobytes())
-    return FileResponse(tmp.name, media_type="audio/wav",
-                        filename=f"tts_{req.speaker_id}.wav",
-                        headers={"X-TTS-Latency-ms": str(int(res.latency_ms)),
-                                 "X-TTS-Engine": res.engine})
+    try:
+        with wave.open(tmp.name, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(res.sample_rate)
+            wf.writeframes(res.audio.tobytes())
+    except Exception:
+        Path(tmp.name).unlink(missing_ok=True)
+        raise
+    return FileResponse(
+        tmp.name, media_type="audio/wav",
+        filename=f"tts_{req.speaker_id}.wav",
+        headers={"X-TTS-Latency-ms": str(int(res.latency_ms)),
+                 "X-TTS-Engine": res.engine},
+        background=BackgroundTask(_cleanup_tmp_file, tmp.name),
+    )
+
+
+def _cleanup_tmp_file(path: str) -> None:
+    try:
+        Path(path).unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 # --- Calls -----------------------------------------------------------------
@@ -386,7 +410,10 @@ async def get_call(call_id: str, _: bool = Depends(verify_api_key)):
 
 @app.get("/calls/{call_id}/transcript", response_model=list[SegmentOut])
 async def get_call_transcript(call_id: str, _: bool = Depends(verify_api_key)):
-    segs = await _call_logger.get_transcript(call_id)
+    try:
+        segs = await _call_logger.get_transcript(call_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return [SegmentOut(**s) for s in segs]
 
 
@@ -403,7 +430,10 @@ async def get_call_audio(call_id: str, _: bool = Depends(verify_api_key)):
 
 @app.delete("/calls/{call_id}")
 async def delete_call(call_id: str, _: bool = Depends(verify_api_key)):
-    await _call_logger.delete_call(call_id)
+    try:
+        await _call_logger.delete_call(call_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {"ok": True}
 
 
@@ -419,7 +449,10 @@ async def chunked_upload_init(
     _: bool = Depends(verify_api_key),
 ):
     upload_id = f"up_{uuid.uuid4().hex[:12]}"
-    call_id = req.call_id or f"call_{uuid.uuid4().hex[:12]}"
+    try:
+        call_id = _safe_call_id(req.call_id or f"call_{uuid.uuid4().hex[:12]}")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid call_id")
     tmp_dir = SETTINGS.calls_dir / call_id
     tmp_dir.mkdir(parents=True, exist_ok=True)
     _uploads[upload_id] = {
@@ -505,6 +538,7 @@ async def _run_bg_transcription(call_id: str, audio_path: str, speaker_id: str, 
             audio_path=audio_path,
             call_id=call_id,
             speaker_id=speaker_id,
+            stt_model="large-v3",  # accuracy-first for uploads; slow CPU is fine here
         )
     except Exception as e:
         logger.exception(f"Background transcription failed for {call_id}: {e}")

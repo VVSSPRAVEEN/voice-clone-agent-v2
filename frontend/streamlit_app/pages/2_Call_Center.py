@@ -60,12 +60,26 @@ call_mode = st.radio(
          "Live streaming: hands-free full-duplex call via WebRTC.",
 )
 
+_STT_SPEEDS = {
+    "Accurate (medium) — slower but best Telugu accuracy": "medium",
+    "Fast (small) — good accuracy, ~4x faster": "small",
+}
+stt_speed_label = st.selectbox(
+    "Transcription speed",
+    options=list(_STT_SPEEDS.keys()),
+    index=0,
+    help="Smaller models reply much faster on CPU. Change it any time — "
+         "all models are preloaded at backend startup.",
+)
+st.session_state["call_stt_model"] = _STT_SPEEDS[stt_speed_label]
+
 
 # --- Live streaming mode (WebRTC full-duplex) ------------------------------
 if call_mode == "🔴 Live streaming (WebRTC)":
     from components.webrtc_audio import render_live_stream
 
-    ctx = render_live_stream(api, selected_speaker, call_title or None)
+    ctx = render_live_stream(api, selected_speaker, call_title or None,
+                             stt_model=st.session_state.get("call_stt_model", "medium"))
     if ctx.state.playing:
         proc = ctx.audio_processor
         st.divider()
@@ -143,6 +157,7 @@ def _start_session():
         "speaker_id": selected_speaker,
         "title": call_title or None,
         "sample_rate": 16000,
+        "stt_model": st.session_state.get("call_stt_model", "medium"),
     }))
     st.session_state["call_ws"] = ws
     st.session_state["call_transcripts"] = []
@@ -189,6 +204,9 @@ def _recv_loop():
         try:
             raw = ws.recv(timeout=0.2)
             failures = 0
+        except TimeoutError:
+            # Idle while the backend is in STT/LLM/TTS (10-60s) is NORMAL.
+            continue
         except Exception as e:
             if _ws_dead(ws):
                 if st.session_state.get("call_ws") is ws:
@@ -270,52 +288,66 @@ if st.session_state.get("call_ws_error"):
     st.error(f"{st.session_state['call_ws_error']} — press 'Start call session' to reconnect.")
 
 
-# --- Mic recorder ----------------------------------------------------------
+# --- Mic recorder / file upload -------------------------------------------
 st.divider()
 st.markdown("### Record an utterance")
-st.caption("Click record, speak (Telugu or English), then click stop. The reply appears automatically — no need to click refresh.")
+st.caption("Click record, speak (Telugu or English), then click stop — or upload a WAV file. The reply appears automatically — no need to click refresh.")
 
-# streamlit audio_input returns WAV bytes on completion
-audio_value = st.audio_input("Click to record")
-if audio_value is not None:
-    wav_bytes = audio_value.getvalue()
-    if wav_bytes and st.session_state.get("call_ws"):
-        # Convert WAV bytes to 16 kHz mono int16 PCM
-        import io, wave
+
+def _send_wav_bytes(wav_bytes: bytes, label: str = "Sent"):
+    """Decode WAV bytes to 16 kHz mono int16 PCM and send over WS."""
+    import io, wave
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            sr = wf.getframerate()
+            n_ch = wf.getnchannels()
+            sampwidth = wf.getsampwidth()
+            raw = wf.readframes(wf.getnframes())
+        if sampwidth != 2:
+            st.error("Only 16-bit PCM WAV is supported.")
+            return
+        arr = np.frombuffer(raw, dtype=np.int16)
+        if n_ch > 1:
+            arr = arr.reshape(-1, n_ch).mean(axis=1).astype(np.int16)
+        if sr != 16000:
+            try:
+                import librosa
+                f32 = arr.astype(np.float32) / 32768.0
+                f32 = librosa.resample(f32, orig_sr=sr, target_sr=16000)
+                arr = (f32 * 32768.0).astype(np.int16)
+            except Exception:
+                st.warning("librosa not available; sending audio at original sample rate.")
+        # Send as binary over WS (auto-reconnect once if the socket died)
+        ws = _ensure_live_ws()
+        if ws is None:
+            st.error("Could not connect to the agent. Is the backend running on :8000?")
+            return
         try:
-            with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
-                sr = wf.getframerate()
-                n_ch = wf.getnchannels()
-                sampwidth = wf.getsampwidth()
-                raw = wf.readframes(wf.getnframes())
-            if sampwidth != 2:
-                st.error("Only 16-bit PCM WAV supported by browser recorder.")
-            else:
-                arr = np.frombuffer(raw, dtype=np.int16)
-                if n_ch > 1:
-                    arr = arr.reshape(-1, n_ch).mean(axis=1).astype(np.int16)
-                if sr != 16000:
-                    try:
-                        import librosa
-                        f32 = arr.astype(np.float32) / 32768.0
-                        f32 = librosa.resample(f32, orig_sr=sr, target_sr=16000)
-                        arr = (f32 * 32768.0).astype(np.int16)
-                    except Exception:
-                        st.warning("librosa not available; sending audio at original sample rate.")
-                # Send as binary over WS (auto-reconnect once if the socket died)
-                ws = _ensure_live_ws()
-                if ws is None:
-                    st.error("Could not connect to the agent. Is the backend running on :8000?")
-                else:
-                    try:
-                        ws.send(arr.tobytes())
-                        ws.send(json.dumps({"type": "end"}))
-                        st.success(f"Sent {len(arr)/16000:.1f}s of audio. Agent is replying — this can take 10-60s on CPU.")
-                    except Exception as e:
-                        st.error(f"WS send failed: {e} — press 'Start call session' to reconnect, then record again.")
+            ws.send(arr.tobytes())
+            ws.send(json.dumps({"type": "end"}))
+            st.success(f"{label} {len(arr)/16000:.1f}s of audio. Agent is replying — this can take 10-60s.")
         except Exception as e:
-            st.error(f"WAV decode failed: {e}")
-    elif not st.session_state.get("call_ws"):
+            st.error(f"WS send failed: {e} — press 'Start call session' to reconnect, then try again.")
+    except Exception as e:
+        st.error(f"WAV decode failed: {e}")
+
+
+col_rec, col_up = st.columns([1, 1])
+with col_rec:
+    audio_value = st.audio_input("Click to record")
+with col_up:
+    uploaded = st.file_uploader("Or upload a WAV file", type=["wav", "wave"])
+
+if audio_value is not None:
+    if st.session_state.get("call_ws"):
+        _send_wav_bytes(audio_value.getvalue())
+    else:
+        st.warning("Start a call session first.")
+
+if uploaded is not None:
+    if st.session_state.get("call_ws"):
+        _send_wav_bytes(uploaded.getvalue(), label=f"Uploaded '{uploaded.name}' —")
+    else:
         st.warning("Start a call session first.")
 
 

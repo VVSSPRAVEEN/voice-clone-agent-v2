@@ -23,6 +23,7 @@ import asyncio
 import json
 from typing import Optional
 
+import librosa
 import numpy as np
 from fastapi import WebSocket, WebSocketDisconnect
 from loguru import logger
@@ -76,6 +77,10 @@ async def handle_call_websocket(
         hello_raw = await asyncio.wait_for(ws.receive_text(), timeout=30.0)
     except (asyncio.TimeoutError, WebSocketDisconnect):
         manager.release(ws)
+        try:
+            await ws.close(code=1008)
+        except Exception:
+            pass
         return
 
     try:
@@ -96,6 +101,10 @@ async def handle_call_websocket(
     title = hello.get("title")
     call_id = hello.get("call_id")
     client_sr = int(hello.get("sample_rate", 16000))
+    stt_model = hello.get("stt_model")
+    if stt_model not in (None, "medium", "small"):
+        logger.warning(f"Ignoring unknown stt_model={stt_model!r} (client speaker={speaker_id})")
+        stt_model = None
 
     # Acquire a processing slot (bounded concurrency)
     await manager.acquire_slot()
@@ -114,10 +123,11 @@ async def handle_call_websocket(
                         break
                     if "bytes" in msg and msg["bytes"] is not None:
                         raw = msg["bytes"]
+                        if len(raw) % 2:
+                            raw += b"\x00"  # tolerate odd-length frames
                         arr = np.frombuffer(raw, dtype=np.int16).copy()
                         if client_sr != 16000:
                             # Resample via librosa if needed
-                            import librosa
                             f32 = arr.astype(np.float32) / 32768.0
                             f32 = librosa.resample(f32, orig_sr=client_sr, target_sr=16000)
                             arr = (f32 * 32768.0).astype(np.int16)
@@ -132,7 +142,14 @@ async def handle_call_websocket(
             except WebSocketDisconnect:
                 client_gone = True
             finally:
-                await audio_q.put(None)
+                # Bounded put so a full queue can't hang the producer (and
+                # with it the only call slot) forever.
+                for _ in range(10):
+                    try:
+                        audio_q.put_nowait(None)
+                        break
+                    except asyncio.QueueFull:
+                        await asyncio.sleep(0.1)
 
         async def audio_stream():
             while True:
@@ -163,6 +180,7 @@ async def handle_call_websocket(
                     speaker_id=speaker_id,
                     call_id=first_call_id,
                     title=title,
+                    stt_model=stt_model,
                     on_event=on_event,
                 ))
                 first_call_id = None  # later turns get fresh call ids
@@ -195,7 +213,15 @@ async def handle_call_websocket(
                 # continue listening for the next utterance on this socket.
                 try:
                     done_call = pipe_task.result()
-                except Exception:
+                except Exception as e:
+                    logger.exception(f"Pipeline error (speaker={speaker_id}): {e}")
+                    try:
+                        await ws.send_text(json.dumps({
+                            "type": "error",
+                            "data": {"stage": "pipeline", "message": str(e)},
+                        }))
+                    except Exception:
+                        pass
                     break
                 await ws.send_text(json.dumps({
                     "type": "call_end",

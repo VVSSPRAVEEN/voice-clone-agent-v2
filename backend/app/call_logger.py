@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 import wave
 from datetime import datetime, timezone
@@ -25,6 +26,15 @@ import numpy as np
 from loguru import logger
 
 from .config import SETTINGS
+
+_CALL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _safe_call_id(call_id: str) -> str:
+    """Reject anything that could traverse out of data/calls (path traversal)."""
+    if not isinstance(call_id, str) or not _CALL_ID_RE.fullmatch(call_id):
+        raise ValueError(f"Invalid call_id: {call_id!r}")
+    return call_id
 
 
 class CallLogger:
@@ -63,7 +73,7 @@ class CallLogger:
         title: str | None = None,
         call_id: str | None = None,
     ) -> str:
-        call_id = call_id or f"call_{uuid.uuid4().hex[:12]}"
+        call_id = _safe_call_id(call_id or f"call_{uuid.uuid4().hex[:12]}")
         call_dir = self.calls_dir / call_id
         call_dir.mkdir(parents=True, exist_ok=True)
         # Empty transcript file
@@ -80,7 +90,7 @@ class CallLogger:
             "transcript_path": str(call_dir / "transcript.jsonl"),
             "segment_count": 0,
         }
-        (call_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+        (call_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
         await self._ensure_db()
         async with self._lock:
@@ -104,6 +114,7 @@ class CallLogger:
         text: str,
         is_final: bool = True,
     ) -> None:
+        call_id = _safe_call_id(call_id)
         call_dir = self.calls_dir / call_id
         if not call_dir.exists():
             logger.warning(f"append_segment: call dir not found: {call_dir}")
@@ -131,12 +142,13 @@ class CallLogger:
         audio_int16: np.ndarray | None = None,
         sample_rate: int = 16000,
     ) -> None:
+        call_id = _safe_call_id(call_id)
         call_dir = self.calls_dir / call_id
         if not call_dir.exists():
             return
         ended_at = datetime.now(timezone.utc).isoformat()
         # Read started_at from meta
-        meta = json.loads((call_dir / "meta.json").read_text())
+        meta = json.loads((call_dir / "meta.json").read_text(encoding="utf-8"))
         started_at = datetime.fromisoformat(meta["started_at"])
         duration = (datetime.fromisoformat(ended_at) - started_at).total_seconds()
 
@@ -150,7 +162,7 @@ class CallLogger:
 
         meta["ended_at"] = ended_at
         meta["duration_s"] = duration
-        (call_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+        (call_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
         await self._ensure_db()
         async with self._lock:
@@ -190,6 +202,7 @@ class CallLogger:
         return dict(zip(cols, row))
 
     async def get_transcript(self, call_id: str) -> list[dict]:
+        call_id = _safe_call_id(call_id)
         path = self.calls_dir / call_id / "transcript.jsonl"
         if not path.exists():
             return []
@@ -205,6 +218,7 @@ class CallLogger:
         return out
 
     async def delete_call(self, call_id: str) -> bool:
+        call_id = _safe_call_id(call_id)
         call_dir = self.calls_dir / call_id
         import shutil
         if call_dir.exists():

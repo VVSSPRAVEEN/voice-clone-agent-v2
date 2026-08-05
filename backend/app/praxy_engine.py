@@ -72,6 +72,8 @@ class PraxyEngine:
         """Return the local path to the Praxy R6 LoRA state dict (download if needed)."""
         if self._ckpt_path:
             return self._ckpt_path
+        import os
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")  # offline-first
         cache_dir: Optional[str] = None
         hf_home = os.environ.get("HF_HOME")
         if hf_home:
@@ -79,10 +81,10 @@ class PraxyEngine:
         elif os.path.isdir(_HF_CACHE_HINT):
             cache_dir = _HF_CACHE_HINT
         logger.info(
-            f"PraxyEngine: downloading {_LORA_REPO}/{_LORA_FILE}"
+            f"PraxyEngine: resolving {_LORA_REPO}/{_LORA_FILE}"
             + (f" (cache_dir={cache_dir})" if cache_dir else "")
         )
-        return hf_hub_download(_LORA_REPO, _LORA_FILE, cache_dir=cache_dir)
+        return hf_hub_download(_LORA_REPO, _LORA_FILE, cache_dir=cache_dir, local_files_only=True)
 
     def ensure_loaded(self) -> None:
         """Lazily load the model. Thread-safe (serialised by a Lock)."""

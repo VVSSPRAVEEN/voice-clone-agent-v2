@@ -17,16 +17,18 @@ from typing import Optional
 
 import av
 import numpy as np
+import streamlit as st
 from streamlit_webrtc import AudioProcessorBase, WebRtcMode, webrtc_streamer
 
 from utils.api_client import APIClient
 
 
 class CallAudioProcessor(AudioProcessorBase):
-    def __init__(self, api: APIClient, speaker_id: str, title: str):
+    def __init__(self, api: APIClient, speaker_id: str, title: str, stt_model: str = "medium"):
         self.api = api
         self.speaker_id = speaker_id
         self.title = title
+        self.stt_model = stt_model
         self.ws = None
         self._recv_thread: Optional[threading.Thread] = None
         self._started = False
@@ -63,6 +65,7 @@ class CallAudioProcessor(AudioProcessorBase):
             "speaker_id": self.speaker_id,
             "title": self.title,
             "sample_rate": sample_rate,
+            "stt_model": self.stt_model,
         }))
         self._started = True
         self.status = "connected"
@@ -181,7 +184,7 @@ class CallAudioProcessor(AudioProcessorBase):
         self.status = "stopped"
 
 
-def render_live_stream(api: APIClient, speaker_id: str, title: str):
+def render_live_stream(api: APIClient, speaker_id: str, title: str, stt_model: str = "medium"):
     """Render the full-duplex streaming call. Returns the streamer context."""
     ctx = webrtc_streamer(
         key="live-call",
@@ -191,7 +194,7 @@ def render_live_stream(api: APIClient, speaker_id: str, title: str):
             "audio": {"echoCancellation": True, "noiseSuppression": True},
             "video": False,
         },
-        audio_processor_factory=lambda: CallAudioProcessor(api, speaker_id, title),
+        audio_processor_factory=lambda: CallAudioProcessor(api, speaker_id, title, stt_model),
         async_processing=True,
         desired_playing_state=st.session_state.get("live_playing", False),
     )

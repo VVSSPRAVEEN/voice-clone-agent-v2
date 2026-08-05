@@ -56,6 +56,7 @@ class Pipeline:
         speaker_id: str,
         call_id: Optional[str] = None,
         title: Optional[str] = None,
+        stt_model: Optional[str] = None,
         on_event: Optional[Callable[[PipelineEvent], Awaitable[None]]] = None,
     ) -> str:
         """Run the full pipeline on a streaming audio input.
@@ -87,7 +88,7 @@ class Pipeline:
 
         await emit(PipelineEvent(kind="status", data={"message": "pipeline_started"}))
 
-        await self._run_sequential(audio_stream, call_id, spk, ref_wav, emit)
+        await self._run_sequential(audio_stream, call_id, spk, ref_wav, emit, stt_model=stt_model)
 
         await emit(PipelineEvent(kind="status", data={"message": "pipeline_finished"}))
         return call_id
@@ -99,6 +100,7 @@ class Pipeline:
         speaker: dict,
         ref_wav,
         emit,
+        stt_model: Optional[str] = None,
     ) -> None:
         """Sequential mode (no VAD): buffer the whole utterance, then run
         STT -> LLM -> TTS once on it. Status events show live progress."""
@@ -115,7 +117,13 @@ class Pipeline:
                     chunk = await asyncio.wait_for(
                         audio_stream.__anext__(), timeout=1.5
                     )
-                except (asyncio.TimeoutError, StopAsyncIteration):
+                except asyncio.TimeoutError:
+                    if buffer.size == 0:
+                        # Silent so far: keep waiting for real audio instead
+                        # of creating empty calls every 1.5 s.
+                        continue
+                    break
+                except StopAsyncIteration:
                     break
                 buffer = np.concatenate([buffer, chunk])
                 now = time.monotonic()
@@ -209,6 +217,7 @@ class Pipeline:
         call_id: str,
         speaker_id: str,
         language: Optional[str] = None,
+        stt_model: Optional[str] = None,
         on_event: Optional[Callable[[PipelineEvent], Awaitable[None]]] = None,
     ) -> str:
         """Stream-transcribe a long audio file (300+ minutes supported).
@@ -224,7 +233,7 @@ class Pipeline:
                     logger.warning(f"on_event failed: {e}")
 
         await emit(PipelineEvent(kind="status", data={"message": "transcription_started"}))
-        async for res in self.stt.transcribe_file(audio_path, language=language):
+        async for res in self.stt.transcribe_file(audio_path, language=language, model_size=stt_model):
             await self.calls.append_segment(
                 call_id, res.start, res.end,
                 speaker=speaker_id, text=res.text, is_final=True,

@@ -59,7 +59,8 @@ class Settings(BaseSettings):
     vad_silence_ms: int = 500
 
     # --- TTS ---
-    tts_engine: Literal["xtts", "sherpa", "ai4bharat", "edge", "hybrid"] = "edge"
+    tts_engine: Literal["xtts", "sherpa", "ai4bharat", "edge", "hybrid"] = "hybrid"
+    tts_allow_online: bool = False  # offline-only: disables Edge-TTS (streams from Microsoft)
     xtts_model: str = "tts_models/multilingual/multi-dataset/xtts_v2"
     xtts_device: Literal["cuda", "cpu"] = "cuda"
     xtts_language: str = "te"

@@ -9,13 +9,17 @@ the kinship-aware greeting behaviour, and how to keep the stack healthy.
 Browser mic (Streamlit UI, :8501)
         │  WebSocket /ws/call (int16 PCM, 16 kHz mono; JSON events back)
         ▼
-Backend (:8000) — single sequential pipeline, NO VAD
-   ├─ STT  → faster-whisper medium/int8 (Telugu/English) — runs on CPU
+Backend (:8000) — single sequential pipeline, NO VAD (stateless; restarts in ~2 s)
+   │   all heavy weights live in the persistent Model Server (:8002)
+   ▼
+Model Server (:8002) — keeps Praxy/XTTS/faster-whisper in memory across
+                        backend restarts (loads ~8–10 min only ONCE per boot)
+   ├─ STT  → faster-whisper medium/small (int8, CPU) — speed selectable in UI
    ├─ LLM  → local vLLM (:8001, Qwen2.5-3B-Instruct-AWQ)
-   └─ TTS  → hybrid router:
+   └─ TTS  → hybrid router (offline-first):
         te/ta  → Praxy (Chatterbox + R6 LoRA) — true voice cloning, 24 kHz
         en/hi  → Coqui XTTS v2 — zero-shot cloning, 24 kHz
-        other  → Edge-TTS (online, no cloning)
+        other  → Edge-TTS only if tts_allow_online=true (default: offline)
 ```
 
 How a turn works (no VAD anywhere): while the mic stream is open the
@@ -24,6 +28,32 @@ sends an `end` frame) it runs the whole utterance through
 STT → LLM → TTS and streams the reply back in 20 ms PCM chunks. A
 "Backend status" panel in the UI shows each stage live
 (`listening → stt_transcribing → llm_thinking → tts_synthesizing`).
+
+## Starting the stack (4 windows, in order)
+
+**1. vLLM** (`:8001`, GPU) — must start on an empty GPU:
+```
+cd /d D:\voice-clone-agent && set "HF_HOME=D:\hf-models" && set "HF_HUB_OFFLINE=1" && D:\vllm-venv\Scripts\python.exe -m vllm.entrypoints.cli.main serve Qwen/Qwen2.5-3B-Instruct-AWQ --port 8001 --gpu-memory-utilization 0.45 --max-model-len 1024 --enforce-eager
+```
+
+**2. Model Server** (`:8002`) — loads all weights once (8–10 min on first
+boot, background), survives backend restarts:
+```
+cd /d D:\voice-clone-agent\backend && D:\voice-clone-agent\backend\.venv\Scripts\python.exe -m uvicorn model_server:app --host 0.0.0.0 --port 8002
+```
+
+**3. Backend** (`:8000`) — restarts in seconds; it only proxies to :8002:
+```
+cd /d D:\voice-clone-agent\backend && D:\voice-clone-agent\backend\.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+**4. Streamlit UI** (`:8501`):
+```
+cd /d D:\voice-clone-agent\frontend\streamlit_app && D:\voice-clone-agent\backend\.venv\Scripts\python.exe -m streamlit run main.py --server.port 8501 --server.headless true
+```
+
+Everything is offline-first (`HF_HUB_OFFLINE=1` set in code): no internet
+requests except the optional WebRTC STUN server used by the browser.
 
 ## Using the Call Center (UI)
 

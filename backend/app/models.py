@@ -117,6 +117,7 @@ class WSServerMessage(BaseModel):
 # --- Health -----------------------------------------------------------------
 
 class HealthOut(BaseModel):
+    model_config = {"protected_namespaces": ()}
     status: Literal["ok", "degraded"]
     device: str
     pipeline_mode: str
@@ -127,6 +128,7 @@ class HealthOut(BaseModel):
     vram_free_mb: int
     speakers_count: int
     calls_count: int
+    model_server_status: Literal["up", "warming", "down"] = "down"
 
 
 # --- Settings snapshot (read-only) -----------------------------------------
