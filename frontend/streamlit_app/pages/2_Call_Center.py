@@ -83,12 +83,21 @@ if "call_id" not in st.session_state:
     st.session_state["call_id"] = None
 if "call_audio_chunks" not in st.session_state:
     st.session_state["call_audio_chunks"] = []
+if "call_status_log" not in st.session_state:
+    st.session_state["call_status_log"] = []
+
+
+def _log_status(message: str, seconds: Optional[float] = None):
+    entry = {"t": time.strftime("%H:%M:%S"), "message": message, "seconds": seconds}
+    log = st.session_state.get("call_status_log", [])
+    log.append(entry)
+    st.session_state["call_status_log"] = log[-30:]
 
 
 def _start_session():
     import websockets.sync.client as ws_sync
     url = api.ws_call_url()
-    ws = ws_sync.connect(url, max_size=None)
+    ws = ws_sync.connect(url, max_size=None, ping_interval=None, ping_timeout=None)
     ws.send(json.dumps({
         "type": "hello",
         "speaker_id": selected_speaker,
@@ -99,6 +108,8 @@ def _start_session():
     st.session_state["call_transcripts"] = []
     st.session_state["call_llm"] = []
     st.session_state["call_audio_chunks"] = []
+    st.session_state["call_status_log"] = []
+    _log_status("connected to backend (ws)")
     st.session_state.pop("call_ws_error", None)
     # Start receiver thread
     t = threading.Thread(target=_recv_loop, daemon=True)
@@ -180,8 +191,11 @@ def _recv_loop():
             elif kind == "call_end":
                 st.session_state["call_id"] = data.get("call_id") or msg.get("call_id")
                 break
+            elif kind == "status":
+                _log_status(data.get("message", "status"), data.get("seconds"))
             elif kind == "error":
                 st.session_state["call_error"] = data.get("message", "unknown error")
+                _log_status(f"error: {data.get('message', 'unknown')}")
 
 
 def _end_session():
@@ -257,6 +271,46 @@ if audio_value is not None:
             st.error(f"WAV decode failed: {e}")
     elif not st.session_state.get("call_ws"):
         st.warning("Start a call session first.")
+
+
+# --- Backend status (live progress from the pipeline) ----------------------
+st.divider()
+st.markdown("### Backend status")
+st.caption("Live view of what the backend is doing with your audio — updates automatically.")
+
+status_names = {
+    "connected to backend (ws)": "Connected to backend",
+    "pipeline_started": "Call session open",
+    "listening": "Listening — audio streaming in",
+    "audio_received": "Audio received, starting STT",
+    "stt_transcribing": "Transcribing your speech…",
+    "llm_thinking": "Agent is thinking…",
+    "tts_synthesizing": "Synthesizing reply in the cloned voice…",
+    "audio_end": "Reply audio sent",
+    "pipeline_finished": "Call finished",
+    "no_audio_received": "No audio received — record and send an utterance",
+    "no_speech_detected": "No speech detected in the audio — try again",
+}
+status_log = st.session_state.get("call_status_log", [])
+if status_log:
+    last = status_log[-1]
+    label = status_names.get(last["message"], last["message"])
+    if last.get("seconds") is not None:
+        label += f" — {last['seconds']}s of audio so far"
+    if last["message"] == "listening":
+        st.info(label)
+    elif last["message"] in ("stt_transcribing", "llm_thinking", "tts_synthesizing"):
+        st.warning(label)
+    elif last["message"].startswith("error"):
+        st.error(label)
+    else:
+        st.success(label)
+    with st.expander(f"Status log ({len(status_log)} events)", expanded=False):
+        for e in status_log[-12:]:
+            sec = f" ({e['seconds']}s)" if e.get("seconds") is not None else ""
+            st.code(f"{e['t']}  {e['message']}{sec}")
+else:
+    st.caption("No backend status yet — start a call session and record an utterance.")
 
 
 # --- Live transcript + bot audio -------------------------------------------

@@ -145,12 +145,6 @@ async def _preload_engines() -> None:
         logger.info("STT preloaded")
     except Exception as e:
         logger.warning(f"STT preload error: {e}")
-    try:
-        vad = get_vad()
-        await asyncio.to_thread(vad._ensure_model)
-        logger.info("VAD preloaded")
-    except Exception as e:
-        logger.warning(f"VAD preload error: {e}")
 
 
 # --- App -------------------------------------------------------------------

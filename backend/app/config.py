@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     log_level: str = "INFO"
-    pipeline_mode: Literal["parallel", "sequential"] = "parallel"
+    pipeline_mode: Literal["parallel", "sequential"] = "sequential"
     max_concurrent_calls: int = 1
 
     # --- Paths ---
