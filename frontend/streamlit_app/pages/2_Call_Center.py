@@ -109,10 +109,19 @@ def _start_session():
 def _ensure_live_ws():
     """Return the live websocket, reconnecting once if the old one died."""
     ws = st.session_state.get("call_ws")
-    if ws is not None and ws.close_code is None:
+    if ws is not None and _ws_dead(ws) is False:
         return ws
     _start_session()
     return st.session_state.get("call_ws")
+
+
+def _ws_dead(ws) -> bool:
+    """True if the websocket is closed. 'close_code' is not present on all
+    versions of websockets.sync, so use getattr."""
+    try:
+        return getattr(ws, "close_code", None) is not None
+    except Exception:
+        return False
 
 
 def _recv_loop():
@@ -121,18 +130,18 @@ def _recv_loop():
         return
     failures = 0
     while True:
-        if ws.close_code is not None:
+        if _ws_dead(ws):
             if st.session_state.get("call_ws") is ws:
-                st.session_state["call_ws_error"] = f"Connection closed by server (code {ws.close_code})"
+                st.session_state["call_ws_error"] = "Connection closed by server."
                 st.session_state["call_ws"] = None
             return
         try:
             raw = ws.recv(timeout=0.2)
             failures = 0
         except Exception as e:
-            if ws.close_code is not None:
+            if _ws_dead(ws):
                 if st.session_state.get("call_ws") is ws:
-                    st.session_state["call_ws_error"] = f"Connection closed (code {ws.close_code})"
+                    st.session_state["call_ws_error"] = "Connection closed by the agent."
                     st.session_state["call_ws"] = None
                 return
             failures += 1
