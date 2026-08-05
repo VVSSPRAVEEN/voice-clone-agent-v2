@@ -1,163 +1,179 @@
-"""Streamlit WebRTC audio component wrapper."""
+"""Streamlit WebRTC full-duplex live call component (streamlit-webrtc 0.47.9).
+
+Mic frames (48 kHz stereo s16 from aiortc) are downmixed, resampled to
+16 kHz mono and streamed to the backend over WebSocket. The backend
+answers with JSON `audio` events carrying int16 PCM reply chunks at the
+TTS rate (24 kHz); those are returned as av.AudioFrame objects so the
+browser plays them live. When no reply audio is queued, silence frames
+are returned to avoid echoing the caller's own mic (SENDRECV passthrough).
+"""
 from __future__ import annotations
 
-import asyncio
 import json
 import queue
 import threading
+import time
 from typing import Optional
 
+import av
 import numpy as np
-import streamlit as st
-from streamlit_webrtc import AudioProcessorBase, ClientSettings, WebRtcMode, webrtc_streamer
+from streamlit_webrtc import AudioProcessorBase, WebRtcMode, webrtc_streamer
 
-from .api_client import APIClient
+from utils.api_client import APIClient
 
 
 class CallAudioProcessor(AudioProcessorBase):
-    """WebRTC audio processor that streams mic audio to the backend over
-    WebSocket and plays back TTS audio chunks received from the backend.
-    """
     def __init__(self, api: APIClient, speaker_id: str, title: str):
         self.api = api
         self.speaker_id = speaker_id
         self.title = title
         self.ws = None
-        self.ws_thread = None
-        self.in_queue: queue.Queue = queue.Queue(maxsize=200)
-        self.out_queue: queue.Queue = queue.Queue(maxsize=400)
+        self._recv_thread: Optional[threading.Thread] = None
+        self._started = False
+        self._lock = threading.Lock()
+        self.out_queue: queue.Queue = queue.Queue(maxsize=4000)
         self.transcripts: list[dict] = []
         self.llm_responses: list[dict] = []
-        self.status: str = "initializing"
+        self.status_log: list[tuple[str, str]] = []
+        self.status: str = "connecting"
         self.call_id: Optional[str] = None
-        self._lock = threading.Lock()
-        self._started = False
+
+    # --- WebSocket plumbing (runs in the framework's worker thread) ---------
+
+    @staticmethod
+    def _ws_dead(ws) -> bool:
+        try:
+            return getattr(ws, "close_code", None) is not None
+        except Exception:
+            return False
 
     def _start_ws(self, sample_rate: int):
-        if self._started:
+        if self._started and self.ws is not None and not self._ws_dead(self.ws):
             return
-        self._started = True
         import websockets.sync.client as ws_sync
-        url = self.api.ws_call_url()
-        self.ws = ws_sync.connect(url, max_size=None)
-        # Send hello
+        self.ws = ws_sync.connect(
+            self.api.ws_call_url(),
+            max_size=None,
+            ping_interval=None,
+            ping_timeout=None,
+            open_timeout=5,
+        )
         self.ws.send(json.dumps({
             "type": "hello",
             "speaker_id": self.speaker_id,
             "title": self.title,
             "sample_rate": sample_rate,
         }))
-        # Start receiver thread
-        self.ws_thread = threading.Thread(target=self._recv_loop, daemon=True)
-        self.ws_thread.start()
+        self._started = True
         self.status = "connected"
+        self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
+        self._recv_thread.start()
+
+    def _send_audio(self, pcm16: np.ndarray):
+        self._start_ws(16000)
+        try:
+            self.ws.send(pcm16.tobytes())
+        except Exception:
+            # Dead socket (e.g. after a backend restart): reconnect once.
+            self._started = False
+            self._start_ws(16000)
+            try:
+                self.ws.send(pcm16.tobytes())
+            except Exception:
+                pass
 
     def _recv_loop(self):
         while True:
+            if self.ws is None or self._ws_dead(self.ws):
+                break
             try:
                 raw = self.ws.recv(timeout=0.1)
-                if isinstance(raw, bytes):
-                    # PCM int16 audio chunk
-                    pcm = np.frombuffer(raw, dtype=np.int16)
-                    try:
-                        self.out_queue.put_nowait(pcm)
-                    except queue.Full:
-                        # Drop if we can't keep up
-                        pass
-                else:
-                    try:
-                        msg = json.loads(raw)
-                    except Exception:
-                        continue
-                    self._handle_msg(msg)
             except Exception:
-                # Timeout or error; keep looping
-                pass
-
-    def _handle_msg(self, msg: dict):
-        kind = msg.get("type")
-        data = msg.get("data") or {}
-        if kind == "hello":
-            self.status = "connected"
-        elif kind == "transcript":
-            with self._lock:
-                self.transcripts.append(data)
-        elif kind == "llm":
-            with self._lock:
-                self.llm_responses.append(data)
-        elif kind == "audio":
-            # Audio chunks come as base64 PCM via JSON; convert
-            import base64
-            pcm_b64 = data.get("pcm_b64") or data.get("pcm_int16_b64")
-            if pcm_b64:
-                pcm = np.frombuffer(base64.b64decode(pcm_b64), dtype=np.int16)
-            else:
-                # JSON list form
-                arr = data.get("pcm_int16")
-                if arr is None:
-                    return
-                pcm = np.array(arr, dtype=np.int16)
+                continue
+            if raw is None:
+                continue
+            if isinstance(raw, bytes):
+                continue  # backend sends all reply audio as JSON text
             try:
-                self.out_queue.put_nowait(pcm)
-            except queue.Full:
-                pass
-        elif kind == "status":
-            self.status = data.get("message", "status")
-        elif kind == "error":
-            self.status = f"error: {data.get('message','')}"
-        elif kind == "call_end":
-            self.call_id = data.get("call_id") or msg.get("call_id")
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            kind = msg.get("type")
+            data = msg.get("data") or {}
+            if kind == "transcript":
+                with self._lock:
+                    self.transcripts.append(data)
+            elif kind == "llm":
+                with self._lock:
+                    self.llm_responses.append(data)
+            elif kind == "audio":
+                arr = data.get("pcm_int16")
+                if arr:
+                    try:
+                        self.out_queue.put_nowait(np.array(arr, dtype=np.int16))
+                    except queue.Full:
+                        pass
+            elif kind == "status":
+                msg_txt = data.get("message", "status")
+                with self._lock:
+                    self.status_log.append((time.strftime("%H:%M:%S"), msg_txt))
+            elif kind == "call_end":
+                self.call_id = data.get("call_id") or msg.get("call_id")
+            elif kind == "error":
+                self.status = f"error: {data.get('message', 'unknown')}"
+                with self._lock:
+                    self.status_log.append((time.strftime("%H:%M:%S"), self.status))
 
-    def recv_audio(self, frames: list) -> Optional["np.ndarray"]:
-        """Called by streamlit-webrtc with incoming mic frames (we send to WS)."""
-        import av
-        # frames: list of av.AudioFrame at 48 kHz stereo by default
-        if not frames:
-            return None
-        # Convert first frame to 16 kHz mono int16
-        frame = frames[0]
-        arr = frame.to_ndarray()  # shape: (channels, samples) float or int
-        if arr.ndim > 1:
-            arr = arr.mean(axis=0)
-        # Resample to 16 kHz
-        from_sr = frame.sample_rate or 48000
-        target_sr = 16000
-        if from_sr != target_sr:
-            import librosa
-            arr_f = arr.astype(np.float32)
-            if arr_f.max() > 1.0 or arr_f.min() < -1.0:
-                arr_f = arr_f / 32768.0
-            arr_f = librosa.resample(arr_f, orig_sr=from_sr, target_sr=target_sr)
-            pcm = (arr_f * 32768.0).astype(np.int16)
-        else:
-            pcm = arr.astype(np.int16)
+    # --- streamlit-webrtc contract ------------------------------------------
 
-        if not self._started:
-            self._start_ws(target_sr)
+    async def recv_queued(self, frames) -> list[av.AudioFrame]:
+        """Async mode: send mic frames to the backend, return reply audio."""
+        if frames:
+            try:
+                import librosa
+            except Exception:
+                librosa = None
+            for frame in frames:
+                arr = frame.to_ndarray()  # (channels, samples) s16 @48k
+                if arr.ndim > 1:
+                    mono = arr.mean(axis=0)
+                else:
+                    mono = arr
+                f32 = mono.astype(np.float32) / 32768.0
+                if librosa is not None:
+                    f32 = librosa.resample(
+                        f32,
+                        orig_sr=frame.sample_rate or 48000,
+                        target_sr=16000,
+                    )
+                pcm = (f32 * 32768.0).astype(np.int16)
+                self._send_audio(pcm)
 
-        # Send raw bytes to backend
+        out: list[np.ndarray] = []
+        while True:
+            try:
+                out.append(self.out_queue.get_nowait())
+            except queue.Empty:
+                break
+
+        if not out:
+            # Silence so SENDRECV doesn't echo the caller's mic back.
+            silence = np.zeros(960, dtype=np.int16)
+            out = [silence]
+        frames_out = []
+        for pcm in out:
+            f = av.AudioFrame.from_ndarray(
+                np.ascontiguousarray(pcm).reshape(1, -1),
+                format="s16",
+                layout="mono",
+            )
+            f.sample_rate = 24000
+            frames_out.append(f)
+        return frames_out
+
+    def on_ended(self):
         try:
-            self.ws.send(pcm.tobytes())
-        except Exception:
-            pass
-        return None  # we don't echo back mic audio
-
-    def recv_queued(self) -> Optional["np.ndarray"]:
-        """Called by streamlit-webrtc to pull TTS audio for playback."""
-        try:
-            pcm = self.out_queue.get_nowait()
-        except queue.Empty:
-            return None
-        # Convert to av.AudioFrame at 24 kHz mono
-        import av
-        from streamlit_webrtc import RTCConfiguration
-        # streamlit-webrtc expects a generator of frames; here we return raw
-        # numpy and let the framework wrap it
-        return pcm
-
-    def stop(self):
-        try:
-            if self.ws:
+            if self.ws is not None and not self._ws_dead(self.ws):
                 self.ws.send(json.dumps({"type": "end"}))
                 self.ws.close()
         except Exception:
@@ -165,16 +181,22 @@ class CallAudioProcessor(AudioProcessorBase):
         self.status = "stopped"
 
 
-def render_webrtc_call(api: APIClient, speaker_id: str, title: str):
-    """Render the WebRTC-based call UI. Returns the audio processor handle."""
-    rtc_config = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+def render_live_stream(api: APIClient, speaker_id: str, title: str):
+    """Render the full-duplex streaming call. Returns the streamer context."""
     ctx = webrtc_streamer(
-        key="voice-call",
+        key="live-call",
         mode=WebRtcMode.SENDRECV,
-        rtc_configuration=rtc_config,
-        desired_playing_state=st.session_state.get("webrtc_playing", True),
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        media_stream_constraints={
+            "audio": {"echoCancellation": True, "noiseSuppression": True},
+            "video": False,
+        },
         audio_processor_factory=lambda: CallAudioProcessor(api, speaker_id, title),
-        media_stream_constraints={"audio": True, "video": False},
         async_processing=True,
+        desired_playing_state=st.session_state.get("live_playing", False),
     )
+    if ctx.state.playing:
+        st.session_state["live_playing"] = True
+    else:
+        st.session_state["live_playing"] = False
     return ctx

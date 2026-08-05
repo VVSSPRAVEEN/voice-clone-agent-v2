@@ -107,7 +107,16 @@ class Pipeline:
         try:
             buffer = np.array([], dtype=np.int16)
             last_status = 0.0
-            async for chunk in audio_stream:
+            # Utterance boundary: ~1.5 s without any audio while the mic is
+            # streaming means the user stopped speaking -> process what we
+            # have. No VAD model involved; "end" frames still force-flush.
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(
+                        audio_stream.__anext__(), timeout=1.5
+                    )
+                except (asyncio.TimeoutError, StopAsyncIteration):
+                    break
                 buffer = np.concatenate([buffer, chunk])
                 now = time.monotonic()
                 if now - last_status >= 1.0:

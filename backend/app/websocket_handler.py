@@ -155,33 +155,54 @@ async def handle_call_websocket(
         await ws.send_text(json.dumps({"type": "hello", "data": {"message": "connected"}}))
 
         producer_task = asyncio.create_task(audio_producer())
-        pipe_task = asyncio.create_task(pipeline.run_streaming(
-            audio_stream=audio_stream(),
-            speaker_id=speaker_id,
-            call_id=call_id,
-            title=title,
-            on_event=on_event,
-        ))
+        first_call_id = call_id
         try:
-            await producer_task
-            if client_gone:
-                # Client left; don't waste a long CPU synthesis on a ghost.
-                pipe_task.cancel()
-                logger.info(f"Client disconnected during call (speaker={speaker_id}); pipeline cancelled")
-            else:
-                call_id = await pipe_task
+            while True:
+                pipe_task = asyncio.create_task(pipeline.run_streaming(
+                    audio_stream=audio_stream(),
+                    speaker_id=speaker_id,
+                    call_id=first_call_id,
+                    title=title,
+                    on_event=on_event,
+                ))
+                first_call_id = None  # later turns get fresh call ids
+                done, _ = await asyncio.wait(
+                    {producer_task, pipe_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if producer_task in done:
+                    # Client sent "end" or disconnected
+                    if client_gone:
+                        pipe_task.cancel()
+                        try:
+                            await pipe_task
+                        except Exception:
+                            pass
+                        logger.info(
+                            f"Client disconnected during call (speaker={speaker_id}); "
+                            "pipeline cancelled"
+                        )
+                    else:
+                        done_call = await pipe_task
+                        await ws.send_text(json.dumps({
+                            "type": "call_end",
+                            "call_id": done_call,
+                            "data": {"call_id": done_call},
+                        }))
+                    break
+                # Pipeline finished on its own (silence flush) while the
+                # producer keeps running -> streaming: report the turn and
+                # continue listening for the next utterance on this socket.
+                try:
+                    done_call = pipe_task.result()
+                except Exception:
+                    break
                 await ws.send_text(json.dumps({
                     "type": "call_end",
-                    "call_id": call_id,
-                    "data": {"call_id": call_id},
+                    "call_id": done_call,
+                    "data": {"call_id": done_call},
                 }))
         finally:
-            if not pipe_task.done():
-                pipe_task.cancel()
-                try:
-                    await pipe_task
-                except Exception:
-                    pass
             if not producer_task.done():
                 producer_task.cancel()
                 try:

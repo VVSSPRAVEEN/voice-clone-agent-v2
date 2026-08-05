@@ -52,6 +52,46 @@ with col1:
 with col2:
     call_title = st.text_input("Call title (optional)", value="", placeholder="e.g. Test call 1")
 
+call_mode = st.radio(
+    "Call mode",
+    ["📝 Record clip", "🔴 Live streaming (WebRTC)"],
+    horizontal=True,
+    help="Record clip: press record, speak, stop — reliable and simple. "
+         "Live streaming: hands-free full-duplex call via WebRTC.",
+)
+
+
+# --- Live streaming mode (WebRTC full-duplex) ------------------------------
+if call_mode == "🔴 Live streaming (WebRTC)":
+    from components.webrtc_audio import render_live_stream
+
+    ctx = render_live_stream(api, selected_speaker, call_title or None)
+    if ctx.state.playing:
+        proc = ctx.audio_processor
+        st.divider()
+        st.markdown("### Backend status")
+        if proc is not None:
+            st.caption(f"Status: `{proc.status}`")
+            if proc.llm_responses:
+                last = proc.llm_responses[-1]
+                st.markdown(f"**Agent said:** {last.get('text','')} _({last.get('source','?')}, {last.get('latency_ms',0):.0f}ms)_")
+            if proc.call_id:
+                st.caption(f"Call: {proc.call_id}")
+            with st.expander("Status log", expanded=False):
+                for t, m in proc.status_log[-12:]:
+                    st.code(f"{t}  {m}")
+            st.markdown("### Transcript")
+            for tr in proc.transcripts[-10:]:
+                who = "🧑 user" if tr.get("speaker") == "user" else "🤖 bot"
+                st.markdown(f"- **{who}:** {tr.get('text','')}")
+        else:
+            st.caption("Waiting for the WebRTC session to start… (grant mic access)")
+        time.sleep(2)
+        st.rerun()
+    else:
+        st.caption("Click ▶ Start to begin the live call. Speak, pause, and the agent replies in the cloned voice — multi-turn on one connection.")
+    st.stop()
+
 
 # --- WebSocket-based call (no WebRTC required) -----------------------------
 # We use a simpler recorder approach: streamlit audio recorder component.
@@ -190,6 +230,11 @@ def _recv_loop():
                 })
             elif kind == "call_end":
                 st.session_state["call_id"] = data.get("call_id") or msg.get("call_id")
+                _log_status("call finished - reply done")
+                # Session is over server-side; force a fresh connection
+                # for the next utterance.
+                if st.session_state.get("call_ws") is ws:
+                    st.session_state["call_ws"] = None
                 break
             elif kind == "status":
                 _log_status(data.get("message", "status"), data.get("seconds"))
@@ -264,6 +309,7 @@ if audio_value is not None:
                 else:
                     try:
                         ws.send(arr.tobytes())
+                        ws.send(json.dumps({"type": "end"}))
                         st.success(f"Sent {len(arr)/16000:.1f}s of audio. Agent is replying — this can take 10-60s on CPU.")
                     except Exception as e:
                         st.error(f"WS send failed: {e} — press 'Start call session' to reconnect, then record again.")
@@ -352,7 +398,10 @@ if st.button("🔄 Refresh view"):
 # --- Auto-refresh while waiting for the bot's reply ------------------------
 # The WS receiver thread fills session_state; Streamlit only re-renders on
 # user interaction, so auto-rerun every few seconds until the reply audio
-# arrives. Once audio exists, stop polling so playback isn't interrupted.
-if st.session_state.get("call_ws") is not None and not st.session_state.get("call_audio_chunks"):
+# arrives or the session ended. Once done, stop polling.
+_waiting = (st.session_state.get("call_ws") is not None
+            and not st.session_state.get("call_audio_chunks")
+            and not st.session_state.get("call_id"))
+if _waiting:
     time.sleep(4)
     st.rerun()

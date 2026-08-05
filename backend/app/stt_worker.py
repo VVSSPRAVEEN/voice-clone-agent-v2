@@ -91,7 +91,7 @@ class STTWorker:
                     audio_f32,
                     language=lang_arg,
                     beam_size=self.beam_size,
-                    vad_filter=False,  # we already VAD upstream
+                    vad_filter=False,  # no VAD: full buffer is transcribed once
                 )
                 text_parts = []
                 t_start = None
