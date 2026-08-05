@@ -102,12 +102,15 @@ async def handle_call_websocket(
     try:
         # Create audio queue from incoming binary frames
         audio_q: asyncio.Queue[np.ndarray | None] = asyncio.Queue(maxsize=64)
+        client_gone = False
 
         async def audio_producer():
+            nonlocal client_gone
             try:
                 while True:
                     msg = await ws.receive()
                     if msg.get("type") == "websocket.disconnect":
+                        client_gone = True
                         break
                     if "bytes" in msg and msg["bytes"] is not None:
                         raw = msg["bytes"]
@@ -127,7 +130,7 @@ async def handle_call_websocket(
                         except Exception:
                             pass
             except WebSocketDisconnect:
-                pass
+                client_gone = True
             finally:
                 await audio_q.put(None)
 
@@ -152,20 +155,33 @@ async def handle_call_websocket(
         await ws.send_text(json.dumps({"type": "hello", "data": {"message": "connected"}}))
 
         producer_task = asyncio.create_task(audio_producer())
+        pipe_task = asyncio.create_task(pipeline.run_streaming(
+            audio_stream=audio_stream(),
+            speaker_id=speaker_id,
+            call_id=call_id,
+            title=title,
+            on_event=on_event,
+        ))
         try:
-            call_id = await pipeline.run_streaming(
-                audio_stream=audio_stream(),
-                speaker_id=speaker_id,
-                call_id=call_id,
-                title=title,
-                on_event=on_event,
-            )
-            await ws.send_text(json.dumps({
-                "type": "call_end",
-                "call_id": call_id,
-                "data": {"call_id": call_id},
-            }))
+            await producer_task
+            if client_gone:
+                # Client left; don't waste a long CPU synthesis on a ghost.
+                pipe_task.cancel()
+                logger.info(f"Client disconnected during call (speaker={speaker_id}); pipeline cancelled")
+            else:
+                call_id = await pipe_task
+                await ws.send_text(json.dumps({
+                    "type": "call_end",
+                    "call_id": call_id,
+                    "data": {"call_id": call_id},
+                }))
         finally:
+            if not pipe_task.done():
+                pipe_task.cancel()
+                try:
+                    await pipe_task
+                except Exception:
+                    pass
             if not producer_task.done():
                 producer_task.cancel()
                 try:

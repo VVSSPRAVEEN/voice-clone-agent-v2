@@ -116,8 +116,10 @@ async def lifespan(app: FastAPI):
     SETTINGS.ensure_dirs()
     logger.info(f"Voice Clone Agent starting | mode={SETTINGS.pipeline_mode} device={SETTINGS.device} tts={SETTINGS.tts_engine}")
     logger.info(f"LLM enabled: {SETTINGS.llm_enabled}")
+    preload_task = asyncio.create_task(_preload_engines())
     yield
     # Cleanup
+    preload_task.cancel()
     try:
         if _tts is not None:
             _tts.unload()
@@ -127,6 +129,16 @@ async def lifespan(app: FastAPI):
             await _llm.close()
     except Exception:
         pass
+
+
+async def _preload_engines() -> None:
+    """Warm TTS engines in the background so the first live call is fast."""
+    try:
+        tts = get_tts()
+        await tts.preload()
+        logger.info("Engine preload complete")
+    except Exception as e:
+        logger.warning(f"Engine preload error: {e}")
 
 
 # --- App -------------------------------------------------------------------

@@ -54,6 +54,7 @@ class TTSWorker:
         self._ai4bharat = None
         self._praxy = None
         self._praxy_failed = False
+        self._praxy_loaded = False
         self._edge_voices = None
         self._lock = asyncio.Lock()
 
@@ -111,6 +112,33 @@ class TTSWorker:
     @property
     def praxy_ready(self) -> bool:
         return not self._praxy_failed
+
+    async def preload(self) -> None:
+        """Warm up engines at startup so the first live call is fast.
+
+        Edge is instant; praxy and XTTS load in the background (CPU), which
+        takes minutes — by the time a caller speaks, the engines are ready.
+        """
+        try:
+            self._ensure_edge()
+        except Exception as e:
+            logger.warning(f"Edge preload failed: {e}")
+        try:
+            if self._praxy is None:
+                from .praxy_engine import PraxyEngine
+                self._praxy = PraxyEngine()
+            if not self._praxy_loaded:
+                logger.info("Preloading Praxy (background, may take minutes on CPU)...")
+                await asyncio.to_thread(self._praxy.ensure_loaded)
+                self._praxy_loaded = True
+                logger.info("Praxy preload complete")
+        except Exception as e:
+            logger.warning(f"Praxy preload failed: {e}")
+        try:
+            self._ensure_xtts()
+            logger.info("XTTS preloaded")
+        except Exception as e:
+            logger.warning(f"XTTS preload failed: {e}")
 
     def _ensure_ai4bharat(self) -> None:
         if self._ai4bharat is not None:
@@ -260,6 +288,7 @@ class TTSWorker:
             self._praxy = PraxyEngine()
         try:
             await asyncio.to_thread(self._praxy.ensure_loaded)
+            self._praxy_loaded = True
         except Exception as exc:
             self._praxy_failed = True
             logger.warning(f"PraxyEngine load failed ({exc}); disabling praxy")
@@ -381,8 +410,9 @@ class TTSWorker:
     def unload(self) -> None:
         if self._praxy is not None:
             self._praxy.unload()
-            self._praxy = None
+        self._praxy = None
         self._praxy_failed = False
+        self._praxy_loaded = False
         self._xtts = None
         self._sherpa = None
         self._ai4bharat = None

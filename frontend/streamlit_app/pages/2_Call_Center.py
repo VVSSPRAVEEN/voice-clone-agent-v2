@@ -109,10 +109,18 @@ def _recv_loop():
     ws = st.session_state.get("call_ws")
     if ws is None:
         return
-    while ws is not None and ws.close_code is None:
+    while True:
+        if ws.close_code is not None:
+            st.session_state["call_ws_error"] = f"Connection closed by server (code {ws.close_code})"
+            st.session_state["call_ws"] = None
+            return
         try:
             raw = ws.recv(timeout=0.2)
-        except Exception:
+        except Exception as e:
+            if ws.close_code is not None:
+                st.session_state["call_ws_error"] = f"Connection closed (code {ws.close_code})"
+                st.session_state["call_ws"] = None
+                return
             continue
         if raw is None:
             continue
@@ -162,11 +170,15 @@ def _end_session():
 
 if start_call:
     _start_session()
+    st.session_state.pop("call_ws_error", None)
     st.success("Call session started. Record an utterance below.")
 
 if end_call:
     _end_session()
     st.info("Call session ended.")
+
+if st.session_state.get("call_ws_error"):
+    st.error(f"{st.session_state['call_ws_error']} — press 'Start call session' to reconnect.")
 
 
 # --- Mic recorder ----------------------------------------------------------
@@ -205,9 +217,9 @@ if audio_value is not None:
                 ws = st.session_state["call_ws"]
                 try:
                     ws.send(arr.tobytes())
-                    st.success(f"Sent {len(arr)/16000:.1f}s of audio to the agent.")
+                    st.success(f"Sent {len(arr)/16000:.1f}s of audio. Agent is replying — this can take 10-60s on CPU.")
                 except Exception as e:
-                    st.error(f"WS send failed: {e}")
+                    st.error(f"WS send failed: {e} — press 'Start call session' to reconnect, then record again.")
         except Exception as e:
             st.error(f"WAV decode failed: {e}")
     elif not st.session_state.get("call_ws"):
