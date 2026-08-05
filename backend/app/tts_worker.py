@@ -141,6 +141,11 @@ class TTSWorker:
         if self._xtts is not None:
             return
         import torch
+        import transformers.pytorch_utils as _tp
+        if not hasattr(_tp, "isin_mps_friendly"):
+            _tp.isin_mps_friendly = (
+                lambda elements, test_elements: torch.isin(elements, test_elements)
+            )
         from TTS.api import TTS as CoquiTTS
         device = "cuda" if SETTINGS.xtts_device == "cuda" and should_use_cuda(2500) else "cpu"
         if SETTINGS.xtts_device == "cuda" and device == "cpu":
