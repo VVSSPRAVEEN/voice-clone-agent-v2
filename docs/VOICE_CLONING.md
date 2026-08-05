@@ -13,10 +13,12 @@ is and is not cloned, and how to get real cloning working.
 | `edge` (Microsoft Edge-TTS, online) | **No** | Fixed neural voices (`te-IN-MohanNeural`, `en-US-JennyNeural`, ...). The reference clip is **ignored** |
 | `sherpa` (sherpa-onnx VITS) | No | Fixed preset voices |
 | `ai4bharat` (FastPitch+HiFi-GAN) | No (and currently broken in this fork) | Fixed speaker id |
+| `hybrid` (auto-routing) | **Yes — te/ta via Praxy, en/hi via XTTS** | Te/Ta → Praxy clones the ref clip; En/Hi → XTTS clones it; other → Edge fixed voices |
 
-> **Current state of this machine:** `TTS_ENGINE=edge`, so cloning is NOT
-> active right now — Edge-TTS speaks with its own preset voices. Switch
-> `TTS_ENGINE=xtts` in `backend/.env` to enable real cloning (see below).
+> **Current state of this machine:** `TTS_ENGINE=hybrid`, so Telugu/Tamil
+> replies are cloned via the Praxy engine (section 6) and English/Hindi via
+> XTTS. Edge-TTS is used only as the fallback for other languages or if
+> Praxy fails to load.
 
 ---
 
@@ -142,12 +144,9 @@ Relevant file: `backend/app/tts_worker.py` (`_pick_edge_voice`, `_synth_edge`).
 
 ## 5. Limitations (be honest with users)
 
-- **Telugu voice cloning is not possible on the current stack.** XTTS lacks
-  Telugu; Edge-TTS won't clone. Options:
-  - Today: Telugu = Edge-TTS preset voices (very good quality, fixed voice).
-  - Future: `Praxel/praxy-voice-r6` (Chatterbox LoRA + 8–11 s Telugu
-    reference clip) does true zero-shot Telugu cloning — vet it before
-    integrating.
+- **XTTS still lacks Telugu.** Edge-TTS preset voices (very good quality,
+  fixed voice) do not clone. Real Telugu/Tamil cloning is now handled by the
+  Praxy engine in hybrid mode — see section 6 below.
 - A poor reference clip (noisy, music, multiple speakers, <3 s or >10 s)
   degrades clone quality.
 - XTTS is CPU-bound here (~25 s/sentence) — that is an inference-speed
@@ -155,12 +154,53 @@ Relevant file: `backend/app/tts_worker.py` (`_pick_edge_voice`, `_synth_edge`).
 
 ---
 
-## 6. Files that matter
+## 6. Praxy engine (hybrid mode)
+
+`TTS_ENGINE=hybrid` routes Telugu/Tamil replies through the **Praxy engine**
+(`backend/app/praxy_engine.py`): ResembleAI Chatterbox multilingual TTS +
+`Praxel/praxy-voice-r6` LoRA, which clones the uploaded speaker voice at
+synthesis time.
+
+End-to-end flow:
+
+1. Upload a reference clip via `POST /speakers` — stored as
+   `data/speakers/{id}/ref.wav` (16 kHz mono).
+2. The backend **auto-transcribes** `ref.wav` and saves the result as the
+   speaker's `prompt_text` (best-effort; `main.py` speaker creation).
+3. Hybrid routing (`tts_worker.py:_synth_hybrid`) sends Telugu/Tamil text
+   with that speaker's `ref.wav` to `PraxyEngine.synth()`.
+4. Praxy romanises the Indic script (BUPS-style, script → ISO via
+   `indic_transliteration`), then generates speech conditioned on the
+   reference clip (`audio_prompt_path=ref.wav`) — the bot speaks in the
+   uploaded speaker's voice at 24 kHz.
+5. English/Hindi replies route to XTTS (zero-shot cloning); everything else
+   falls back to Edge-TTS. If Praxy fails to load, it is auto-disabled and
+   Telugu/Tamil falls back to Edge-TTS.
+
+Requirements:
+
+- `chatterbox-tts` pip package (plus `peft`, `indic_transliteration`).
+- Weights are cached under `HF_HOME=D:/hf-models` (set at the top of
+  `config.py`), so the Chatterbox base + R6 LoRA live on D: and are not
+  re-downloaded after the first run.
+
+Limitations:
+
+- Telugu/Tamil use Chatterbox's `language_id="hi"` as a proxy — there is no
+  native te/ta language id in the base model, so output carries a
+  Hindi-tinged accent.
+- Cloning is done via `audio_prompt_path` (audio-conditioned), not a learned
+  speaker embedding.
+- First load is slow (~6 min: weight download + CUDA/CPU load). After that
+  the model stays loaded for the process lifetime.
+
+## 7. Files that matter
 
 | File | Role |
 |---|---|
 | `backend/app/speaker_registry.py` | Store/convert/validate reference clips |
-| `backend/app/tts_worker.py` | XTTS/Edge/sherpa synthesis + script-based voice routing |
+| `backend/app/tts_worker.py` | XTTS/Edge/sherpa/Praxy synthesis + script-based voice routing |
+| `backend/app/praxy_engine.py` | Chatterbox + R6 LoRA cloning engine (Telugu/Tamil, hybrid mode) |
 | `backend/app/pipeline.py` | `run_streaming` (live), `analyze_file` (long files) |
 | `backend/app/main.py` | REST/WS endpoints (speakers, TTS, upload, analyze) |
 | `backend/.env` | `TTS_ENGINE`, `XTTS_DEVICE`, `edge_voice`, `HF_TOKEN`, ... |

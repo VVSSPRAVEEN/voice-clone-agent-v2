@@ -156,8 +156,10 @@ class PraxyEngine:
 
         # Synthesis (language_id="hi" is the te/ta proxy in Chatterbox) ----------
         def _generate():
+            model = self._model
+            assert model is not None
             with torch.inference_mode():
-                return self._model.generate(
+                return model.generate(
                     text_roman,
                     language_id="hi",
                     audio_prompt_path=ref_wav,

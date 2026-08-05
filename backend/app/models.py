@@ -30,6 +30,7 @@ class SpeakerOut(BaseModel):
     display_name: str
     language: str
     ref_duration_s: float
+    prompt_text: Optional[str] = None
     created_at: datetime
 
 

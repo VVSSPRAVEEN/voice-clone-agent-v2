@@ -115,11 +115,29 @@ latency.
   plug in Ollama, vLLM, LM Studio, or OpenAI itself without code changes.
 
 #### TTS (`tts_worker.py`)
-- Engine: Coqui XTTS v2 (default) or sherpa-onnx VITS (fallback)
-- VRAM: ~4 GB (XTTS) or ~1 GB (sherpa)
+- Engine: configurable (`edge` is the default) — `xtts` (Coqui XTTS v2),
+  `sherpa` (sherpa-onnx VITS), `ai4bharat`, `edge` (online), or `hybrid`
+- VRAM: ~4 GB (XTTS) or ~1 GB (sherpa); Praxy/XTTS fall back to CPU when
+  free VRAM is tight
 - Zero-shot cloning: pass `speaker_ref_wav` path; XTTS conditions on the
   3-10 s reference clip at synthesis time
 - Streams audio in 20 ms chunks for low-latency playback
+
+With `TTS_ENGINE=hybrid` (`tts_worker.py:_synth_hybrid`), each reply is
+routed by language and cloned where possible:
+
+| Reply language             | Engine                    | Cloning |
+|----------------------------|---------------------------|---------|
+| Telugu / Tamil (+ ref wav) | Praxy (`praxy_engine.py`) | Yes — Chatterbox + `Praxel/praxy-voice-r6` LoRA via `audio_prompt_path` |
+| English / Hindi            | XTTS v2                   | Yes — reference clip |
+| Everything else            | Edge-TTS                  | No — fixed preset voice |
+
+If Praxy fails to load it is auto-disabled and Telugu/Tamil falls back to
+Edge-TTS. GPU memory is arbitrated by `gpu_utils.py`: with vLLM resident
+(~4.3 GB of the 6 GB card), whisper (STT), Praxy, and XTTS auto-run on CPU
+when free VRAM drops below their thresholds (STT 1400 MiB, Praxy 3600 MiB,
+XTTS 2500 MiB); `AUTO_CPU_FALLBACK=false` restores the old always-CUDA
+behaviour. Chatterbox/Praxy weights are served from `HF_HOME=D:/hf-models`.
 
 ### Speaker Registry (`speaker_registry.py`)
 

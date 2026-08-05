@@ -254,7 +254,7 @@ class TTSWorker:
             from .praxy_engine import PraxyEngine
             self._praxy = PraxyEngine()
         try:
-            self._praxy.ensure_loaded()
+            await asyncio.to_thread(self._praxy.ensure_loaded)
         except Exception as exc:
             self._praxy_failed = True
             logger.warning(f"PraxyEngine load failed ({exc}); disabling praxy")

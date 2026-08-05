@@ -5,26 +5,41 @@ A self-hosted, zero-shot voice cloning agent that supports bilingual
 playback, and 300-minute long-audio handling. Designed to fit on a single
 RTX 3060 6 GB GPU.
 
-> **Note on local LLM:** Per project decision, the local LLM (Qwen2.5-3B via
-> llama.cpp) was removed because of deployment difficulty. The LLM stage is
-> now an **optional external API hook** (any OpenAI-compatible endpoint such
-> as Ollama, vLLM, LM Studio, or OpenAI itself). When no LLM is configured,
-> the pipeline falls back to a simple rule-based responder so the rest of the
-> system (STT, voice cloning, call logging, UI) remains fully functional.
+> **Note on local LLM:** The LLM stage is an OpenAI-compatible API hook. On
+> this machine it is a **local vLLM server** (Qwen2.5-3B-Instruct-AWQ,
+> `http://127.0.0.1:8001`, set `LLM_ENABLED=true` + `LLM_API_URL` in
+> `backend/.env`); any other OpenAI-compatible endpoint (Ollama, LM Studio,
+> OpenAI) works too. When no LLM is configured, the pipeline falls back to a
+> simple rule-based responder so the rest of the system (STT, voice cloning,
+> call logging, UI) remains fully functional.
 
 ---
 
 ## Quick start
 
 ```bash
-git clone <this repo>
-cd voice-clone-agent
-cp .env.example .env                # review / edit
-make build                          # build docker images
-make download                       # download all model weights (~5 GB)
-make up                             # start backend + frontend
+# 0) Weights: already cached under D:\hf-models (config.py sets
+#    HF_HOME=D:/hf-models automatically at import time). Optional manual
+#    (re)download:  cd backend && .venv\Scripts\python.exe scripts\download_models.py
+
+# 1) Backend (FastAPI + WebSocket)  -> http://localhost:8000
+cd backend && .venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# 2) Frontend (Streamlit UI)        -> http://localhost:8501
+cd frontend\streamlit_app && ..\..\backend\.venv\Scripts\python.exe -m streamlit run main.py --server.port 8501
+
+# 3) Optional local LLM (vLLM, Qwen2.5-3B-Instruct-AWQ) -> http://127.0.0.1:8001
+#    Sized for the 6 GB GPU: --enforce-eager (no CUDA graphs),
+#    --gpu-memory-utilization 0.7, --max-model-len 1024 (small KV cache).
+#    Skip this step to use the rule-based fallback.
+D:\vllm-venv\Scripts\python.exe -m vllm.entrypoints.cli.main serve Qwen/Qwen2.5-3B-Instruct-AWQ `
+  --port 8001 --enforce-eager --gpu-memory-utilization 0.7 --max-model-len 1024
+
 # Backend:  http://localhost:8000    (FastAPI + WebSocket)
 # Frontend: http://localhost:8501    (Streamlit UI)
+
+# (The Makefile's `make dev-backend` / `make dev-frontend` run the same two
+#  commands; all other make targets are Docker-based.)
 ```
 
 ## What's inside
@@ -35,6 +50,7 @@ make up                             # start backend + frontend
 | VAD              | Silero VAD (ONNX, CPU)                  | ~0 GB  |
 | TTS (cloning)    | Coqui XTTS v2 (multilingual, zero-shot) | ~4 GB  |
 | TTS (alt)        | sherpa-onnx VITS (Telugu/English)       | ~1 GB  |
+| TTS (hybrid)     | Praxy (te/ta) / XTTS (en/hi) / Edge     | ~0-4 GB|
 | LLM (optional)   | External OpenAI-compatible API          | 0 GB   |
 | Diarization      | (Hook only — not enabled by default)    | —      |
 
@@ -117,7 +133,7 @@ voice-clone-agent/
 
 ## Configuration
 
-All runtime config lives in `.env` (see `.env.example`). The most important
+All runtime config lives in `backend/.env` (see `.env.example` at the repo root). The most important
 toggles:
 
 | Variable           | Default      | Notes                                       |
@@ -126,24 +142,51 @@ toggles:
 | `MAX_CONCURRENT_CALLS` | `1`      | Higher values require more VRAM             |
 | `STT_MODEL`        | `medium`     | `tiny` / `base` / `small` / `medium` / `large-v3` |
 | `STT_LANGUAGE`     | `te`         | Telugu; use `auto` for autodetect           |
-| `TTS_ENGINE`       | `xtts`       | `xtts` (Coqui) or `sherpa` (VITS)           |
-| `LLM_ENABLED`      | `false`      | Set `true` and configure `LLM_API_BASE`     |
+| `TTS_ENGINE`       | `edge`       | `xtts` / `sherpa` / `ai4bharat` / `edge` / `hybrid` (auto-routing) |
+| `AUTO_CPU_FALLBACK`| `true`       | Auto-run STT/Praxy/XTTS on CPU when VRAM is low; `false` = always CUDA |
+| `LLM_ENABLED`      | `true`       | Set `false` to use the rule-based fallback; configure `LLM_API_URL` when enabled |
+| `LLM_API_URL`      | `http://127.0.0.1:8001` | Local vLLM OpenAI endpoint (worker appends `/v1/chat/completions`) |
+| `HF_HOME`          | `D:/hf-models`| Read by `huggingface_hub` (not pydantic); set at the top of `config.py` |
+
+## Hybrid TTS & GPU memory
+
+With `TTS_ENGINE=hybrid` each reply is routed by language instead of a single
+engine:
+
+- **Telugu / Tamil** (with a speaker reference clip) → **Praxy engine**:
+  Chatterbox multilingual base + `Praxel/praxy-voice-r6` LoRA, cloning the
+  uploaded speaker's voice. If Praxy fails to load it is auto-disabled and
+  Telugu/Tamil falls back to Edge-TTS.
+- **English / Hindi** → **XTTS v2** (zero-shot cloning from the reference
+  clip).
+- **Everything else** → **Edge-TTS** (online preset voices, no cloning).
+
+- **GPU memory:** vLLM holds ~4.3 GB of the 6 GB card, so free VRAM is
+  tight. whisper (STT), Praxy, and XTTS check free VRAM and **auto-run on
+  CPU** when it is insufficient (thresholds: STT 1400 MiB, Praxy 3600 MiB,
+  XTTS 2500 MiB). Set `AUTO_CPU_FALLBACK=false` to restore the old
+  always-CUDA behaviour.
+- **Praxy engine:** ResembleAI Chatterbox multilingual + R6 LoRA cloning of
+  the uploaded speaker voice for Telugu/Tamil, 24 kHz output.
+- **Weights on D:** — `HF_HOME=D:/hf-models` is set at the top of
+  `config.py`, so the Chatterbox/Praxy weights are cached on D: and are not
+  re-downloaded after the first run.
 
 ## Local LLM (optional)
 
 To wire up an LLM without changing this codebase:
 
-1. Run any OpenAI-compatible server locally, e.g.
+1. Run any OpenAI-compatible server locally - e.g. the vLLM command from
+   Quick start - or:
    ```bash
    ollama run qwen2.5:3b-instruct
    # serves on http://localhost:11434/v1
    ```
-2. In `.env`:
+2. In `backend/.env`:
    ```
    LLM_ENABLED=true
-   LLM_API_BASE=http://host.docker.internal:11434/v1
-   LLM_API_KEY=ollama
-   LLM_MODEL=qwen2.5:3b-instruct
+   LLM_API_URL=http://127.0.0.1:8001   # local vLLM; no /v1 suffix - worker appends it
+   LLM_MODEL=Qwen/Qwen2.5-3B-Instruct-AWQ
    ```
 
 If `LLM_ENABLED=false`, the pipeline uses a rule-based responder (echo +

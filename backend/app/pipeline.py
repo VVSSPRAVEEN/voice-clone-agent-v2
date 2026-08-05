@@ -198,7 +198,11 @@ class Pipeline:
                 await llm_out.put(None)
 
         # --- TTS stage ---
+        parts: list = []
+        last_sr = {"v": 16000}
+
         async def tts_stage():
+            nonlocal parts, last_sr
             try:
                 while True:
                     item = await llm_out.get()
@@ -210,6 +214,8 @@ class Pipeline:
                         speaker_ref_wav=ref_wav,
                         language=stt_res.language,
                     )
+                    parts.append(tts_res.audio)
+                    last_sr["v"] = tts_res.sample_rate
                     # Persist bot transcript
                     bot_t0 = seg.t1
                     bot_t1 = bot_t0 + (len(tts_res.audio) / tts_res.sample_rate)
@@ -249,7 +255,10 @@ class Pipeline:
             _drain(tts_out),
         )
         # Finalize call
-        await self.calls.finalize_call(call_id)
+        audio_all = np.concatenate(parts) if parts else None
+        await self.calls.finalize_call(
+            call_id, audio_int16=audio_all, sample_rate=last_sr["v"]
+        )
 
     async def _run_sequential(
         self,
@@ -260,6 +269,8 @@ class Pipeline:
         emit,
     ) -> None:
         """Sequential mode: one segment at a time, full pipeline per segment."""
+        parts: list = []
+        sr = 16000
         try:
             async for seg in self.vad.stream_segments(audio_stream):
                 if seg.samples.size == 0:
@@ -302,6 +313,8 @@ class Pipeline:
                     speaker_ref_wav=ref_wav,
                     language=stt_res.language,
                 )
+                parts.append(tts_res.audio)
+                sr = tts_res.sample_rate
                 bot_t0 = seg.t1
                 bot_t1 = bot_t0 + (len(tts_res.audio) / tts_res.sample_rate)
                 await self.calls.append_segment(
@@ -323,7 +336,8 @@ class Pipeline:
                     "t0": bot_t0, "t1": bot_t1, "latency_ms": tts_res.latency_ms,
                 }))
         finally:
-            await self.calls.finalize_call(call_id)
+            audio_all = np.concatenate(parts) if parts else None
+            await self.calls.finalize_call(call_id, audio_int16=audio_all, sample_rate=sr)
 
     async def transcribe_file_streaming(
         self,
@@ -403,12 +417,17 @@ class Pipeline:
 
         await emit(PipelineEvent(kind="status", data={"message": "analysis_started"}))
         combined: list[str] = []
+        detected_lang: Optional[str] = None
+        tts_audio = None
+        tts_sr = 16000
         try:
             # --- STT the whole file in chunks ---
             async for res in self.stt.transcribe_file(audio_path, language=language):
                 if not res.text:
                     continue
                 combined.append(res.text)
+                if res.language:
+                    detected_lang = res.language
                 await self.calls.append_segment(
                     call_id, res.start, res.end,
                     speaker="user", text=res.text, is_final=True,
@@ -431,7 +450,7 @@ class Pipeline:
                 full_text = full_text[-20_000:]
 
             # --- LLM: one intelligent response to the full transcript ---
-            llm_res = await self.llm.generate(full_text, language or SETTINGS.stt_language)
+            llm_res = await self.llm.generate(full_text, detected_lang or language or SETTINGS.stt_language)
             await emit(PipelineEvent(
                 kind="llm",
                 data={
@@ -446,8 +465,10 @@ class Pipeline:
             tts_res = await self.tts.synthesize(
                 text=llm_res.text,
                 speaker_ref_wav=ref_wav,
-                language=language or SETTINGS.stt_language,
+                language=detected_lang or language or SETTINGS.stt_language,
             )
+            tts_audio = tts_res.audio
+            tts_sr = tts_res.sample_rate
             t0 = next(
                 (seg["t1"] for seg in await self.calls.get_transcript(call_id)
                  if seg.get("speaker") == "user"),
@@ -475,7 +496,7 @@ class Pipeline:
             await emit(PipelineEvent(kind="status", data={"message": "analysis_finished"}))
             return call_id
         finally:
-            await self.calls.finalize_call(call_id)
+            await self.calls.finalize_call(call_id, audio_int16=tts_audio, sample_rate=tts_sr)
 
 
 async def _drain(q: asyncio.Queue):
