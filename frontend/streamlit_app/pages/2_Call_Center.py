@@ -184,7 +184,7 @@ if st.session_state.get("call_ws_error"):
 # --- Mic recorder ----------------------------------------------------------
 st.divider()
 st.markdown("### Record an utterance")
-st.caption("Click record, speak (Telugu or English), then click stop. The audio is sent to the agent over WebSocket.")
+st.caption("Click record, speak (Telugu or English), then click stop. The reply appears automatically — no need to click refresh.")
 
 # streamlit audio_input returns WAV bytes on completion
 audio_value = st.audio_input("Click to record")
@@ -259,4 +259,13 @@ with col_b:
 
 # --- Refresh button (manual since WS is async) -----------------------------
 if st.button("🔄 Refresh view"):
+    st.rerun()
+
+
+# --- Auto-refresh while waiting for the bot's reply ------------------------
+# The WS receiver thread fills session_state; Streamlit only re-renders on
+# user interaction, so auto-rerun every few seconds until the reply audio
+# arrives. Once audio exists, stop polling so playback isn't interrupted.
+if st.session_state.get("call_ws") is not None and not st.session_state.get("call_audio_chunks"):
+    time.sleep(4)
     st.rerun()
