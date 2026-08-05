@@ -38,24 +38,31 @@ with col_left:
         sid = st.text_input("Speaker ID", value="", placeholder="e.g. ramesh_telugu")
         name = st.text_input("Display name", value="", placeholder="e.g. Ramesh (Telugu)")
         lang = st.selectbox("Default language", ["te", "en", "hi", "ta", "kn"], index=0)
+        mic = st.audio_input("🎙️ Record from mic (3-10 s)")
+        st.caption("— or —")
         ref = st.file_uploader(
-            "Reference audio (3-10 s)",
+            "Upload reference audio (3-10 s)",
             type=["wav", "mp3", "m4a", "ogg", "flac"],
             accept_multiple_files=False,
         )
         submitted = st.form_submit_button("Register", type="primary")
         if submitted:
-            if not sid or not name or ref is None:
-                st.error("All fields required.")
+            if not sid or not name or (ref is None and mic is None):
+                st.error("All fields required — upload or record a reference clip.")
             else:
-                raw = ref.read()
+                if mic is not None:
+                    raw = mic.getvalue()
+                    fmt = "wav"
+                else:
+                    raw = ref.read()
+                    fmt = (ref.name.split(".")[-1] if "." in ref.name else "wav")
                 try:
                     meta = api.create_speaker(
                         speaker_id=sid.strip(),
                         display_name=name.strip(),
                         language=lang,
                         ref_audio_bytes=raw,
-                        ref_format=(ref.name.split(".")[-1] if "." in ref.name else "wav"),
+                        ref_format=fmt,
                     )
                     st.success(f"Created speaker: {meta['speaker_id']} ({meta['ref_duration_s']:.2f}s ref)")
                     _list_speakers.clear()
