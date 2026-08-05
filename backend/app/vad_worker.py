@@ -186,7 +186,7 @@ class VADWorker:
         self,
         audio_iter: AsyncIterator[np.ndarray],
     ) -> AsyncIterator[VADSegment]:
-        self._ensure_model()
+        await asyncio.to_thread(self._ensure_model)
         buffer = np.array([], dtype=np.int16)
         offset_s = 0.0
         last_emitted_end = 0

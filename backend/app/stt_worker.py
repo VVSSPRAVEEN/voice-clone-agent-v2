@@ -77,7 +77,7 @@ class STTWorker:
     ) -> STTResult:
         """Transcribe a 16 kHz int16 PCM segment."""
         async with self._lock:
-            self._ensure_model()
+            await asyncio.to_thread(self._ensure_model)
             audio_f32 = pcm_int16.astype(np.float32) / 32768.0
             t0 = time.perf_counter()
             lang_arg = language or self.language
@@ -129,7 +129,7 @@ class STTWorker:
         """
         import soundfile as sf
         async with self._lock:
-            self._ensure_model()
+            await asyncio.to_thread(self._ensure_model)
             # Use soundfile to get info first
             info = sf.info(audio_path)
             sr = info.samplerate

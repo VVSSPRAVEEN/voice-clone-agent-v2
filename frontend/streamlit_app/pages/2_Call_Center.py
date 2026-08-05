@@ -99,27 +99,48 @@ def _start_session():
     st.session_state["call_transcripts"] = []
     st.session_state["call_llm"] = []
     st.session_state["call_audio_chunks"] = []
+    st.session_state.pop("call_ws_error", None)
     # Start receiver thread
     t = threading.Thread(target=_recv_loop, daemon=True)
     st.session_state["call_recv_thread"] = t
     t.start()
 
 
+def _ensure_live_ws():
+    """Return the live websocket, reconnecting once if the old one died."""
+    ws = st.session_state.get("call_ws")
+    if ws is not None and ws.close_code is None:
+        return ws
+    _start_session()
+    return st.session_state.get("call_ws")
+
+
 def _recv_loop():
     ws = st.session_state.get("call_ws")
     if ws is None:
         return
+    failures = 0
     while True:
         if ws.close_code is not None:
-            st.session_state["call_ws_error"] = f"Connection closed by server (code {ws.close_code})"
-            st.session_state["call_ws"] = None
+            if st.session_state.get("call_ws") is ws:
+                st.session_state["call_ws_error"] = f"Connection closed by server (code {ws.close_code})"
+                st.session_state["call_ws"] = None
             return
         try:
             raw = ws.recv(timeout=0.2)
+            failures = 0
         except Exception as e:
             if ws.close_code is not None:
-                st.session_state["call_ws_error"] = f"Connection closed (code {ws.close_code})"
-                st.session_state["call_ws"] = None
+                if st.session_state.get("call_ws") is ws:
+                    st.session_state["call_ws_error"] = f"Connection closed (code {ws.close_code})"
+                    st.session_state["call_ws"] = None
+                return
+            failures += 1
+            if failures >= 5:
+                # Socket is hard-dead (no close frame). Let the sender reconnect.
+                if st.session_state.get("call_ws") is ws:
+                    st.session_state["call_ws_error"] = "Connection to the agent was lost (socket died)."
+                    st.session_state["call_ws"] = None
                 return
             continue
         if raw is None:
@@ -213,13 +234,16 @@ if audio_value is not None:
                         arr = (f32 * 32768.0).astype(np.int16)
                     except Exception:
                         st.warning("librosa not available; sending audio at original sample rate.")
-                # Send as binary over WS
-                ws = st.session_state["call_ws"]
-                try:
-                    ws.send(arr.tobytes())
-                    st.success(f"Sent {len(arr)/16000:.1f}s of audio. Agent is replying — this can take 10-60s on CPU.")
-                except Exception as e:
-                    st.error(f"WS send failed: {e} — press 'Start call session' to reconnect, then record again.")
+                # Send as binary over WS (auto-reconnect once if the socket died)
+                ws = _ensure_live_ws()
+                if ws is None:
+                    st.error("Could not connect to the agent. Is the backend running on :8000?")
+                else:
+                    try:
+                        ws.send(arr.tobytes())
+                        st.success(f"Sent {len(arr)/16000:.1f}s of audio. Agent is replying — this can take 10-60s on CPU.")
+                    except Exception as e:
+                        st.error(f"WS send failed: {e} — press 'Start call session' to reconnect, then record again.")
         except Exception as e:
             st.error(f"WAV decode failed: {e}")
     elif not st.session_state.get("call_ws"):
