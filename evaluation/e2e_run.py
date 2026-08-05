@@ -3,6 +3,10 @@ import sys
 import wave
 import numpy as np
 
+# Force UTF-8 stdout so Telugu/Devanagari text never crashes cp1252.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, r"D:\voice-clone-agent\backend")
 
 from app.config import SETTINGS

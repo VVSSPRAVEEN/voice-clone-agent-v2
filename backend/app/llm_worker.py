@@ -88,7 +88,6 @@ class LLMWorker:
         else:
             has_telugu = any("\u0c00" <= ch <= "\u0c7f" for ch in user_text)
             reply = random.choice(_TELUGU_ACKS if has_telugu else _ENGLISH_ACKS)
-        time.sleep(0.05)
         return LLMResult(text=reply, latency_ms=50.0, source="fallback")
 
     async def close(self) -> None:

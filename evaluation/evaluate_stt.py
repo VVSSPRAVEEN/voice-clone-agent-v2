@@ -10,6 +10,12 @@ Output: JSON report + writes to evaluation/results/stt_<timestamp>.json
 """
 from __future__ import annotations
 
+import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 import argparse
 import asyncio
 import json

@@ -16,6 +16,7 @@ import numpy as np
 from loguru import logger
 
 from .config import SETTINGS
+from .gpu_utils import should_use_cuda
 
 
 @dataclass
@@ -39,7 +40,14 @@ class STTWorker:
         beam_size: int | None = None,
     ):
         self.model_size = model_size or SETTINGS.stt_model
-        self.device = device or SETTINGS.stt_device
+        if device is not None:
+            self.device = device
+        elif SETTINGS.stt_device_cuda and should_use_cuda(1400):
+            self.device = "cuda"
+        else:
+            self.device = "cpu"
+            if SETTINGS.stt_device_cuda:
+                logger.warning("STT: insufficient free GPU memory; falling back to CPU")
         self.compute_type = compute_type or SETTINGS.stt_compute_type
         self.language = language or SETTINGS.stt_language
         self.beam_size = beam_size if beam_size is not None else SETTINGS.stt_beam_size
@@ -75,30 +83,36 @@ class STTWorker:
             lang_arg = language or self.language
             if lang_arg == "auto":
                 lang_arg = None
-            segments, info = await asyncio.to_thread(
-                self._model.transcribe,
-                audio_f32,
-                language=lang_arg,
-                beam_size=self.beam_size,
-                vad_filter=False,  # we already VAD upstream
-            )
-            # faster-whisper returns a generator; consume it
-            text_parts = []
-            t_start = None
-            t_end = None
-            for seg in segments:
-                text_parts.append(seg.text.strip())
-                if t_start is None or seg.start < t_start:
-                    t_start = seg.start
-                if t_end is None or seg.end > t_end:
-                    t_end = seg.end
+
+            def _transcribe() -> tuple[str, str, float, float, list]:
+                # Run + fully consume the lazy generator off the event loop so
+                # the decode never blocks the asyncio loop.
+                segments, info = self._model.transcribe(
+                    audio_f32,
+                    language=lang_arg,
+                    beam_size=self.beam_size,
+                    vad_filter=False,  # we already VAD upstream
+                )
+                text_parts = []
+                t_start = None
+                t_end = None
+                for seg in segments:
+                    text_parts.append(seg.text.strip())
+                    if t_start is None or seg.start < t_start:
+                        t_start = seg.start
+                    if t_end is None or seg.end > t_end:
+                        t_end = seg.end
+                return (" ".join(text_parts).strip(),
+                        info.language, t_start or 0.0, t_end or 0.0,
+                        text_parts)
+
+            text, det_lang, start, end, _ = await asyncio.to_thread(_transcribe)
             elapsed = (time.perf_counter() - t0) * 1000
-            text = " ".join(text_parts).strip()
             return STTResult(
                 text=text,
-                language=info.language if lang_arg is None else lang_arg,
-                start=t_start or 0.0,
-                end=t_end or 0.0,
+                language=det_lang if lang_arg is None else lang_arg,
+                start=start,
+                end=end,
                 latency_ms=elapsed,
             )
 
@@ -144,28 +158,35 @@ class STTWorker:
                         audio_f32, orig_sr=sr, target_sr=16000
                     )
                 t0 = time.perf_counter()
-                segments, stt_info = await asyncio.to_thread(
-                    self._model.transcribe,
-                    audio_f32,
-                    language=lang_arg,
-                    beam_size=self.beam_size,
-                    vad_filter=True,
-                )
-                text_parts = []
-                t_start = None
-                t_end = None
-                for seg in segments:
-                    text_parts.append(seg.text.strip())
-                    if t_start is None or seg.start < t_start:
-                        t_start = seg.start
-                    if t_end is None or seg.end > t_end:
-                        t_end = seg.end
+
+                def _transcribe_chunk() -> tuple[str, str, float, float]:
+                    # Run + fully consume the lazy generator in a thread so the
+                    # decode never blocks the asyncio loop.
+                    segments, stt_info = self._model.transcribe(
+                        audio_f32,
+                        language=lang_arg,
+                        beam_size=self.beam_size,
+                        vad_filter=True,
+                    )
+                    text_parts = []
+                    t_start = None
+                    t_end = None
+                    for seg in segments:
+                        text_parts.append(seg.text.strip())
+                        if t_start is None or seg.start < t_start:
+                            t_start = seg.start
+                        if t_end is None or seg.end > t_end:
+                            t_end = seg.end
+                    return (" ".join(text_parts).strip(),
+                            stt_info.language, t_start or 0.0, t_end or 0.0)
+
+                text, det_lang, t_start, t_end = await asyncio.to_thread(_transcribe_chunk)
                 elapsed = (time.perf_counter() - t0) * 1000
                 yield STTResult(
-                    text=" ".join(text_parts).strip(),
-                    language=stt_info.language if lang_arg is None else lang_arg,
-                    start=(offset / sr) + (t_start or 0.0),
-                    end=(offset / sr) + (t_end or 0.0),
+                    text=text,
+                    language=det_lang if lang_arg is None else lang_arg,
+                    start=(offset / sr) + t_start,
+                    end=(offset / sr) + t_end,
                     latency_ms=elapsed,
                 )
                 offset += chunk_samples

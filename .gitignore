@@ -27,6 +27,9 @@ data/calls/*
 !data/calls/.gitkeep
 data/models/*
 !data/models/.gitkeep
+data/calls.db
+data/*.db
+*.pid
 
 # Evaluation assets (gitignored by design)
 evaluation/test_clips/*

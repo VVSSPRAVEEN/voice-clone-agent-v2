@@ -85,8 +85,7 @@ class Pipeline:
             raise ValueError(f"Speaker {speaker_id} has no reference audio")
 
         # Create call
-        if call_id is None:
-            call_id = await self.calls.create_call(speaker_id, title)
+        call_id = call_id or await self.calls.create_call(speaker_id, title)
 
         async def emit(ev: PipelineEvent):
             ev.data.setdefault("call_id", call_id)
@@ -120,8 +119,6 @@ class Pipeline:
         stt_out: asyncio.Queue[tuple[VADSegment, STTResult] | None] = asyncio.Queue(maxsize=8)
         llm_out: asyncio.Queue[tuple[VADSegment, STTResult, LLMResult] | None] = asyncio.Queue(maxsize=8)
         tts_out: asyncio.Queue[tuple[VADSegment, TTSResult] | None] = asyncio.Queue(maxsize=8)
-
-        speaker_label = speaker.get("display_name", speaker["speaker_id"])
 
         # --- VAD stage ---
         async def vad_stage():
@@ -263,7 +260,6 @@ class Pipeline:
         emit,
     ) -> None:
         """Sequential mode: one segment at a time, full pipeline per segment."""
-        speaker_label = speaker.get("display_name", speaker["speaker_id"])
         try:
             async for seg in self.vad.stream_segments(audio_stream):
                 if seg.samples.size == 0:
@@ -394,10 +390,8 @@ class Pipeline:
         if ref_wav is None or not ref_wav.exists():
             raise ValueError(f"No reference audio for speaker_id: {speaker_id}")
 
-        speaker_label = spk.get("display_name", spk["speaker_id"])
         call_id = call_id or f"call_{uuid.uuid4().hex[:12]}"
         await self.calls.create_call(speaker_id=speaker_id, title=title, call_id=call_id)
-        ref_wav = self.speakers.get_ref_wav(speaker_id)
 
         async def emit(ev: PipelineEvent):
             ev.data.setdefault("call_id", call_id)

@@ -5,6 +5,10 @@ for the full list and defaults.
 """
 from __future__ import annotations
 
+import os
+
+os.environ.setdefault("HF_HOME", "D:/hf-models")
+
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -39,6 +43,7 @@ class Settings(BaseSettings):
     cuda_visible_devices: str = "0"
     pytorch_cuda_alloc_conf: str = "max_split_size_mb:128"
     force_cpu: bool = False
+    auto_cpu_fallback: bool = True
 
     # --- STT ---
     stt_model: str = "medium"
@@ -54,7 +59,7 @@ class Settings(BaseSettings):
     vad_silence_ms: int = 500
 
     # --- TTS ---
-    tts_engine: Literal["xtts", "sherpa", "ai4bharat", "edge"] = "edge"
+    tts_engine: Literal["xtts", "sherpa", "ai4bharat", "edge", "hybrid"] = "edge"
     xtts_model: str = "tts_models/multilingual/multi-dataset/xtts_v2"
     xtts_device: Literal["cuda", "cpu"] = "cuda"
     xtts_language: str = "te"

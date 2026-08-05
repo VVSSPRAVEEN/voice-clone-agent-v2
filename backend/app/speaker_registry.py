@@ -99,10 +99,19 @@ class SpeakerRegistry:
             "language": language,
             "ref_audio_path": str(d / "ref.wav"),
             "ref_duration_s": duration,
+            "prompt_text": "",
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         (d / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
         logger.info(f"Speaker created: {sid} ({display_name}), ref={duration:.2f}s")
+        return meta
+
+    def update_meta(self, speaker_id: str, **fields) -> dict | None:
+        meta = self.get(speaker_id)
+        if meta is None:
+            return None
+        meta.update(fields)
+        (self._dir(speaker_id) / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
         return meta
 
     def delete(self, speaker_id: str) -> bool:

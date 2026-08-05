@@ -22,6 +22,12 @@ Conversation JSON format:
 """
 from __future__ import annotations
 
+import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 import argparse
 import asyncio
 import json
@@ -99,8 +105,12 @@ async def main():
             yield pcm
 
         events: list[PipelineEvent] = []
+        first_audio_t: float | None = None  # wall-clock time of first audio chunk
 
         async def on_event(ev: PipelineEvent):
+            nonlocal first_audio_t
+            if ev.kind == "audio" and first_audio_t is None:
+                first_audio_t = time.perf_counter()
             events.append(ev)
 
         t0 = time.perf_counter()
@@ -121,17 +131,12 @@ async def main():
         stt_event = next((e for e in events if e.kind == "transcript"), None)
         llm_event = next((e for e in events if e.kind == "llm"), None)
         audio_end_event = next((e for e in events if e.kind == "audio_end"), None)
-        # First audio chunk timestamp
-        first_audio_t = None
-        for e in events:
-            if e.kind == "audio":
-                first_audio_t = time.perf_counter()
-                break
+        # First audio chunk timestamp (captured live in on_event)
+        turn_latency_ms = (first_audio_t - t0) * 1000 if first_audio_t else elapsed * 1000
 
         stt_latency = stt_event.data.get("latency_ms", 0) if stt_event else 0
         llm_latency = llm_event.data.get("latency_ms", 0) if llm_event else 0
         tts_latency = audio_end_event.data.get("latency_ms", 0) if audio_end_event else 0
-        turn_latency_ms = (first_audio_t - t0) * 1000 if first_audio_t else elapsed * 1000
 
         results.append({
             "index": i,

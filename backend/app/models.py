@@ -21,6 +21,7 @@ class SpeakerMeta(BaseModel):
     language: str
     ref_audio_path: str
     ref_duration_s: float
+    prompt_text: Optional[str] = None
     created_at: datetime
 
 

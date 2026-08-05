@@ -190,7 +190,7 @@ def main():
     print("  Pace   : voiced pitch-events per second (approx syllables/sec).")
     print("  Jitter : low (<1%) smooth, high (>3%) rough/robotic.")
     print("  Shimmer: low (<3%) steady amplitude, high = shaky.")
-    print("  F1/F2  : vowel timbre — big F1+F2 distance difference implies a")
+    print("  F1/F2  : vowel timbre - big F1+F2 distance difference implies a")
     print("           different accent / vowel space. F2-F1 wider = brighter accent.")
     print("  Sim    : MFCC timbre match (cosine). >80 same-ish voice, <60 differ.")
 

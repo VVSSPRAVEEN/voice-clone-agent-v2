@@ -25,13 +25,17 @@ import numpy as np
 from loguru import logger
 
 from .config import SETTINGS
+from .gpu_utils import should_use_cuda
 
-async def _validate_edge_voice(voice: str) -> None:
+async def _validate_edge_voice(voice: str) -> bool:
     import edge_tts
     voices = await edge_tts.list_voices()
     ok = any(v["ShortName"] == voice for v in voices)
     if not ok:
-        logger.warning(f"Edge-TTS voice '{voice}' not found; using default te-IN-MohanNeural")
+        logger.warning(
+            f"Edge-TTS voice '{voice}' not found; falling back to te-IN-MohanNeural"
+        )
+    return ok
 
 
 @dataclass
@@ -48,6 +52,8 @@ class TTSWorker:
         self._xtts = None
         self._sherpa = None
         self._ai4bharat = None
+        self._praxy = None
+        self._praxy_failed = False
         self._edge_voices = None
         self._lock = asyncio.Lock()
 
@@ -59,6 +65,8 @@ class TTSWorker:
         elif self.engine == "ai4bharat":
             self._ensure_ai4bharat()
         elif self.engine == "edge":
+            self._ensure_edge()
+        elif self.engine == "hybrid":
             self._ensure_edge()
         else:
             raise ValueError(f"Unknown TTS engine: {self.engine}")
@@ -77,7 +85,10 @@ class TTSWorker:
         def _validate():
             holder["error"] = None
             try:
-                asyncio.run(_validate_edge_voice(voice))
+                ok = asyncio.run(_validate_edge_voice(voice))
+                if not ok:
+                    SETTINGS.edge_voice = "te-IN-MohanNeural"
+                    holder["fixed"] = True
             except Exception as e:  # pragma: no cover - surfaced below
                 holder["error"] = e
         t = threading.Thread(target=_validate, daemon=True)
@@ -85,8 +96,21 @@ class TTSWorker:
         t.join()
         if holder.get("error"):
             raise holder["error"]
-        self._edge_voices = True
-        logger.info(f"Edge-TTS ready (voice={voice})")
+        import os
+        os.environ["EDGE_VOICE"] = SETTINGS.edge_voice
+        self._edge_voices = SETTINGS.edge_voice
+        if holder.get("fixed"):
+            logger.info("Edge-TTS configured voice invalid; reset to te-IN-MohanNeural")
+        logger.info(f"Edge-TTS ready (voice={SETTINGS.edge_voice})")
+
+    def _edge_voice_for(self, text: str, language: Optional[str]) -> str:
+        if isinstance(self._edge_voices, str):
+            SETTINGS.edge_voice = self._edge_voices
+        return self._pick_edge_voice(text, language)
+
+    @property
+    def praxy_ready(self) -> bool:
+        return not self._praxy_failed
 
     def _ensure_ai4bharat(self) -> None:
         if self._ai4bharat is not None:
@@ -100,7 +124,9 @@ class TTSWorker:
                 "Download te.zip from AI4Bharat/Indic-TTS releases and extract "
                 "it into data/models/ai4bharat-te/te/."
             )
-        device = "cuda" if SETTINGS.xtts_device == "cuda" and torch.cuda.is_available() else "cpu"
+        device = "cuda" if SETTINGS.xtts_device == "cuda" and should_use_cuda(1500) else "cpu"
+        if SETTINGS.xtts_device == "cuda" and device == "cpu":
+            logger.warning("AI4Bharat TTS: insufficient free GPU memory; falling back to CPU")
         logger.info(f"Loading AI4Bharat Telugu FastPitch+HiFi-GAN on device={device}")
         self._ai4bharat = CoquiTTS(
             model_path=str(model_dir / "fastpitch" / "best_model.pth"),
@@ -116,7 +142,9 @@ class TTSWorker:
             return
         import torch
         from TTS.api import TTS as CoquiTTS
-        device = "cuda" if SETTINGS.xtts_device == "cuda" and torch.cuda.is_available() else "cpu"
+        device = "cuda" if SETTINGS.xtts_device == "cuda" and should_use_cuda(2500) else "cpu"
+        if SETTINGS.xtts_device == "cuda" and device == "cpu":
+            logger.warning("XTTS: insufficient free GPU memory; falling back to CPU")
         logger.info(f"Loading Coqui XTTS v2 on device={device}")
         self._xtts = CoquiTTS(SETTINGS.xtts_model).to(device)
         self._xtts_device = device
@@ -171,6 +199,8 @@ class TTSWorker:
             self._ensure_model()
             if self.engine == "xtts":
                 return await self._synth_xtts(text, speaker_ref_wav, language)
+            elif self.engine == "hybrid":
+                return await self._synth_hybrid(text, speaker_ref_wav, language)
             elif self.engine == "ai4bharat":
                 return await self._synth_ai4bharat(text)
             elif self.engine == "edge":
@@ -214,6 +244,52 @@ class TTSWorker:
             engine="xtts",
         )
 
+    async def _synth_praxy(
+        self,
+        text: str,
+        speaker_ref_wav: str | Path,
+        language: str,
+    ) -> TTSResult:
+        if self._praxy is None:
+            from .praxy_engine import PraxyEngine
+            self._praxy = PraxyEngine()
+        try:
+            self._praxy.ensure_loaded()
+        except Exception as exc:
+            self._praxy_failed = True
+            logger.warning(f"PraxyEngine load failed ({exc}); disabling praxy")
+            raise
+        t0 = time.perf_counter()
+        audio, sr = await asyncio.to_thread(
+            self._praxy.synth, text, str(speaker_ref_wav), language
+        )
+        elapsed = (time.perf_counter() - t0) * 1000
+        return TTSResult(
+            audio=audio,
+            sample_rate=sr,
+            latency_ms=elapsed,
+            engine="praxy",
+        )
+
+    async def _synth_hybrid(
+        self,
+        text: str,
+        speaker_ref_wav: str | Path,
+        language: Optional[str],
+    ) -> TTSResult:
+        lang = (language or SETTINGS.xtts_language).lower()
+        if lang.startswith(("te", "ta")) and speaker_ref_wav:
+            if self.praxy_ready:
+                try:
+                    return await self._synth_praxy(text, speaker_ref_wav, lang)
+                except Exception as exc:
+                    logger.warning(f"Praxy TTS failed ({exc}); falling back to Edge-TTS")
+            return await self._synth_edge(text, language)
+        if lang.startswith(("en", "hi")):
+            self._ensure_xtts()
+            return await self._synth_xtts(text, speaker_ref_wav, lang)
+        return await self._synth_edge(text, language)
+
     async def _synth_ai4bharat(self, text: str) -> TTSResult:
         t0 = time.perf_counter()
         def _do():
@@ -231,17 +307,24 @@ class TTSWorker:
 
     @staticmethod
     def _pick_edge_voice(text: str, language: Optional[str]) -> str:
-        # Prefer voice by detected script (more reliable than LLM/speaker tags,
-        # which can be wrong for code-mixed replies e.g. Telugu + "din").
-        has_telugu = any("\u0c00" <= ch <= "\u0c7f" for ch in text)
-        has_tamil = any("\u0b80" <= ch <= "\u0bff" for ch in text)
-        has_hindi = any("\u0900" <= ch <= "\u097f" for ch in text)
-        if has_telugu:
-            return SETTINGS.edge_voice  # te-IN-MohanNeural / te-IN-ShrutiNeural
-        if has_tamil:
-            return "ta-IN-PallaviNeural"
-        if has_hindi:
-            return "hi-IN-MadhurNeural"
+        # Full edge-TTS Indic + English coverage keyed by Unicode script block.
+        # Script beats language tag: LLM/speaker tags are unreliable for
+        # code-mixed replies (e.g. Telugu + "din").
+        # Voice names verified live against edge-tts 7.2.8 (2026-08).
+        scripts = [
+            ("\u0c00", "\u0c7f", "te-IN-MohanNeural"),    # Telugu (configurable)
+            ("\u0b80", "\u0bff", "ta-IN-PallaviNeural"),   # Tamil
+            ("\u0a80", "\u0aff", "gu-IN-NiranjanNeural"),  # Gujarati
+            ("\u0c80", "\u0cff", "kn-IN-GaganNeural"),     # Kannada
+            ("\u0d00", "\u0d7f", "ml-IN-MidhunNeural"),    # Malayalam
+            ("\u0980", "\u09ff", "bn-IN-TanishaaNeural"),  # Bengali + Assamese (shared script)
+            ("\u0900", "\u097f", "hi-IN-MadhurNeural"),    # Devanagari: hi/mr/ne/sa (proxy hi)
+            ("\u0600", "\u06ff", "ur-IN-SalmanNeural"),    # Urdu (Perso-Arabic)
+            # Gurmukhi (pa) U+0A00-0A7F and Odia U+0B00-0B7F: no edge voice -> fallthrough
+        ]
+        for lo, hi_ch, voice in scripts:
+            if any(lo <= ch <= hi_ch for ch in text):
+                return voice
         lang = (language or SETTINGS.xtts_language).lower()
         if lang.startswith("en"):
             return "en-US-JennyNeural"
@@ -249,7 +332,7 @@ class TTSWorker:
 
     async def _synth_edge(self, text: str, language: Optional[str]) -> TTSResult:
         import edge_tts
-        voice = self._pick_edge_voice(text, language)
+        voice = self._edge_voice_for(text, language)
         t0 = time.perf_counter()
         buf = BytesIO()
         async for chunk in edge_tts.Communicate(text=text, voice=voice).stream():
@@ -291,6 +374,10 @@ class TTSWorker:
         )
 
     def unload(self) -> None:
+        if self._praxy is not None:
+            self._praxy.unload()
+            self._praxy = None
+        self._praxy_failed = False
         self._xtts = None
         self._sherpa = None
         self._ai4bharat = None

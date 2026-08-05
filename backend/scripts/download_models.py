@@ -50,8 +50,8 @@ MODELS = {
 
 
 def download_url(url: str, dest: Path) -> None:
-    print(f"  → {url}")
-    print(f"  → {dest}")
+    print(f"  -> {url}")
+    print(f"  -> {dest}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
         print(f"  (already exists, skipping)")
@@ -84,7 +84,7 @@ def download_faster_whisper(root: Path) -> None:
         local_dir_use_symlinks=False,
         allow_patterns=["*.bin", "*.json", "*.txt", "tokenizer/*", "vocabulary.*"],
     )
-    print(f"  done → {local}")
+    print(f"  done -> {local}")
 
 
 def download_xtts(root: Path) -> None:
@@ -126,7 +126,7 @@ def download_sherpa_telugu(root: Path) -> None:
         with tarfile.open(tmp_dir / fname, "r:bz2") as tar:
             tar.extractall(dest_dir.parent)
         (tmp_dir / fname).unlink()
-    print(f"  done → {dest_dir}")
+    print(f"  done -> {dest_dir}")
 
 
 def main():

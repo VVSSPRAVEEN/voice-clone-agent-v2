@@ -244,6 +244,17 @@ async def create_speaker(
         ref_audio_bytes=raw,
         ref_audio_format=suffix,
     )
+    try:
+        ref = _speaker_reg.get_ref_wav(meta["speaker_id"])
+        if ref is not None:
+            stt = get_stt()
+            parts = []
+            async for res in stt.transcribe_file(str(ref), language="auto"):
+                parts.append(res.text)
+            prompt_text = " ".join(parts).strip()
+            _speaker_reg.update_meta(meta["speaker_id"], prompt_text=prompt_text)
+    except Exception as e:
+        logger.warning(f"Auto-transcription failed for speaker {meta['speaker_id']}: {e}")
     return SpeakerOut(
         speaker_id=meta["speaker_id"],
         display_name=meta["display_name"],
@@ -398,8 +409,8 @@ async def chunked_upload_init(
         "chunks": [None] * req.total_chunks,
         "tmp_dir": tmp_dir,
     }
-    # Pre-create call record
-    await _call_logger.create_call(speaker_id="upload", title=req.filename)
+    # Pre-create call record (use the SAME call_id so segments don't orphan)
+    await _call_logger.create_call(speaker_id="upload", title=req.filename, call_id=call_id)
     return ChunkedUploadInitResponse(upload_id=upload_id, call_id=call_id)
 
 
